@@ -63,10 +63,14 @@ make_params() {
     # Claude Code 2.1.220 appends /v1/messages itself. Forward the canonical
     # Routify base directly to the agent process to avoid /v1/v1/messages.
     extra="$(jq -cn --arg base_url "${MODEL_BASE_URL}" \
-      '{ANTHROPIC_BASE_URL:$base_url}')"
+      '{ANTHROPIC_BASE_URL:$base_url,
+        CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS:"1",
+        DISABLE_PROMPT_CACHING:"1"}')"
     if [[ "${instance}" == github-repo-analytics-* ]]; then
       extra="$(jq -cn --arg base_url "${MODEL_BASE_URL}" --arg token "${GH_TOKEN}" \
-        '{ANTHROPIC_BASE_URL:$base_url,GH_TOKEN:$token}')"
+        '{ANTHROPIC_BASE_URL:$base_url,
+          CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS:"1",
+          DISABLE_PROMPT_CACHING:"1",GH_TOKEN:$token}')"
     fi
     jq -cn --arg id "${instance}" --arg split "${condition}" \
       --arg agent_extra_env "${extra}" \
