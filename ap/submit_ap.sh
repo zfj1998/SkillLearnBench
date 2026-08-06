@@ -69,7 +69,7 @@ make_params() {
         '{ANTHROPIC_BASE_URL:$base_url,GH_TOKEN:$token}')"
     fi
     jq -cn --arg id "${instance}" --arg split "${condition}" \
-      --argjson agent_extra_env "${extra}" \
+      --arg agent_extra_env "${extra}" \
       '{instance_id:$id,split:$split,agent_extra_env:$agent_extra_env}' >> "${output}"
   done
   printf '\n]\n' >> "${output}"
@@ -85,7 +85,17 @@ print(s, end="")'
 redact_params_file() {
   local path="$1"
   local redacted="${path}.redacted"
-  jq 'map(if .agent_extra_env.GH_TOKEN != null then .agent_extra_env.GH_TOKEN = "<redacted>" else . end)' \
+  jq 'map(
+    if (.agent_extra_env | type) == "string" then
+      .agent_extra_env |= (
+        fromjson |
+        if .GH_TOKEN != null then .GH_TOKEN = "<redacted>" else . end |
+        tojson
+      )
+    elif .agent_extra_env.GH_TOKEN != null then
+      .agent_extra_env.GH_TOKEN = "<redacted>"
+    else . end
+  )' \
     "${path}" > "${redacted}"
   chmod 600 "${redacted}"
   mv "${redacted}" "${path}"
