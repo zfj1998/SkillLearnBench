@@ -12,6 +12,7 @@ AP_QUEUE="${AP_QUEUE:-queue-o0cgkmwaegbk7onwxcqz}"
 MODEL="${MODEL:-claude-opus-5}"
 MODEL_BASE_URL="${MODEL_BASE_URL:-https://routify-pub.alibaba-inc.com/protocol/anthropic}"
 AGENT_VERSION="${AGENT_VERSION:-2.1.220}"
+STREAM_IDLE_TIMEOUT_MS="${STREAM_IDLE_TIMEOUT_MS:-1200000}"
 HARBOR_IMAGE="${HARBOR_IMAGE:-code-agi-sg-docker-registry-vpc.ap-southeast-1.cr.aliyuncs.com/eflops/harbor-repo:harbor-reasoning-trace-202607071040}"
 ARTIFACT_DIR="${ROOT_DIR}/ap/artifacts/submissions"
 
@@ -124,11 +125,13 @@ submit_condition() {
     --arg api_key "${MODEL_API_KEY}" \
     --arg version "${AGENT_VERSION}" \
     --arg effort "${REASONING_EFFORT}" \
+    --argjson stream_idle_timeout_ms "${STREAM_IDLE_TIMEOUT_MS}" \
     '{docker_image:$image,dataset_type:"local",dataset:$dataset,
       harbor_agent:"claude-code",harbor_env:"docker",provider:"anthropic",
       native_anthropic:"true",force_proxy:"false",model:$model,
       model_base_url:$base_url,model_api_key:$api_key,agent_version:$version,
       reasoning_effort:$effort,max_tokens:128000,max_thinking_tokens:127000,
+      stream_idle_timeout_ms:$stream_idle_timeout_ms,
       n_attempts:1,n_concurrent:1,max_retries:0,max_iterations:200,
       timeout_multiplier:4,agent_timeout_multiplier:4,
       verifier_timeout_multiplier:4,environment_build_timeout_multiplier:4,
