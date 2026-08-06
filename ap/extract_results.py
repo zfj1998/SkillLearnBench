@@ -17,6 +17,38 @@ from pathlib import Path
 CONDITIONS = {"no_skill", "human_authored"}
 
 
+def agent_log_usage(trial_dir: Path) -> tuple[int | None, int | None, bool | None]:
+    """Recover usage and terminal success when Harbor aggregation is absent."""
+    path = trial_dir / "agent" / "claude-code.txt"
+    if not path.is_file():
+        return None, None, None
+    input_tokens = 0
+    output_tokens = 0
+    saw_usage = False
+    terminal_success: bool | None = None
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "assistant":
+            usage = (event.get("message") or {}).get("usage") or {}
+            current_input = usage.get("input_tokens")
+            current_output = usage.get("output_tokens")
+            if isinstance(current_input, int) and isinstance(current_output, int):
+                input_tokens += current_input
+                output_tokens += current_output
+                saw_usage = True
+        elif event.get("type") == "result":
+            terminal_success = (
+                event.get("is_error") is False
+                and event.get("terminal_reason") not in {"api_error", "error"}
+            )
+    if not saw_usage:
+        return None, None, terminal_success
+    return input_tokens, output_tokens, terminal_success
+
+
 def trial_results(root: Path):
     for path in sorted(root.rglob("result.json")):
         try:
@@ -71,12 +103,16 @@ def main() -> int:
             input_tokens = agent_result.get("n_input_tokens")
             output_tokens = agent_result.get("n_output_tokens")
             exception = result.get("exception_info")
+            terminal_success = None
+            if not isinstance(input_tokens, int) or input_tokens <= 0:
+                input_tokens, output_tokens, terminal_success = agent_log_usage(path.parent)
             infrastructure_failure = (
                 exception is not None
                 or reward not in (0, 0.0, 1, 1.0)
                 or isinstance(reward, bool)
                 or not isinstance(input_tokens, int)
                 or input_tokens <= 0
+                or terminal_success is False
             )
             rows.append(
                 {
@@ -87,6 +123,7 @@ def main() -> int:
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "exception_info": exception,
+                    "terminal_success": terminal_success,
                     "trial_id": result.get("id"),
                     "result_path": str(path),
                 }
