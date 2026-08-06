@@ -12,6 +12,13 @@ the 20 task families, then average the 20 task-family means. Only the
 deterministic task verifier is scored; the GPT-based skill/trajectory metrics
 are intentionally outside this phase.
 
+The current immutable dataset is
+`skilllearnbench/skilllearnbench-a0da045-phase1-v4`. It pins upstream revision
+`a0da045a8bf64b8a8ff20730c4d6ef10dc4e2c5b` and applies one symmetric
+infrastructure-only normalization to both conditions: the two Scala task
+images install only the requested Scala 2.13.12 toolchain instead of running
+the unrelated, rate-limit-prone `cs setup` step.
+
 The upstream learning protocol is separate from evaluation: a method sees only
 `<task>/<task>-1` (without tests, human skills, or sibling instances), writes
 one task-level skill, and that frozen skill is then evaluated on every instance
