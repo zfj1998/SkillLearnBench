@@ -82,6 +82,15 @@ s=re.sub(r"(model_api_key|api_key|GH_TOKEN)(.{0,20}?)([A-Za-z0-9_./+\-=]{12,})",
 print(s, end="")'
 }
 
+redact_params_file() {
+  local path="$1"
+  local redacted="${path}.redacted"
+  jq 'map(if .agent_extra_env.GH_TOKEN != null then .agent_extra_env.GH_TOKEN = "<redacted>" else . end)' \
+    "${path}" > "${redacted}"
+  chmod 600 "${redacted}"
+  mv "${redacted}" "${path}"
+}
+
 submit_condition() {
   local condition="$1"
   local action="$2"
@@ -122,7 +131,12 @@ submit_condition() {
     --priority medium
     --format json)
   [[ "${action}" == dry-run ]] && command+=(--dry-run)
+  set +e
   "${command[@]}" | redact | tee "${output}"
+  local submit_status="${PIPESTATUS[0]}"
+  set -e
+  redact_params_file "${params}"
+  [[ "${submit_status}" -eq 0 ]] || return "${submit_status}"
   echo "saved redacted response: ${output}"
 }
 
