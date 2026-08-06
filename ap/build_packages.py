@@ -19,6 +19,7 @@ TASKS = ROOT / "tasks"
 HUMAN_SKILLS = ROOT / "skills" / "human_authored"
 DEFAULT_OUTPUT = ROOT / "ap" / "artifacts" / "packages"
 CONDITIONS = ("no_skill", "human_authored")
+BENCHMARK_REVISION = "a0da045a8bf64b8a8ff20730c4d6ef10dc4e2c5b"
 
 
 def sha256(path: Path) -> str:
@@ -30,9 +31,23 @@ def sha256(path: Path) -> str:
 
 
 def source_revision() -> str:
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+    revision = subprocess.check_output(
+        ["git", "rev-parse", BENCHMARK_REVISION], cwd=ROOT, text=True
     ).strip()
+    subprocess.run(
+        [
+            "git",
+            "diff",
+            "--quiet",
+            revision,
+            "--",
+            "tasks",
+            "skills/human_authored",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    return revision
 
 
 def instances() -> list[tuple[str, Path]]:
@@ -73,12 +88,38 @@ def normalized_tar(source: Path, archive: Path) -> None:
                         tar.addfile(info)
 
 
+def normalize_harbor_task_name(task_toml: Path, instance_id: str) -> str | None:
+    """Adapt an upstream display name when the optional field is present."""
+    normalized_name = f"skilllearnbench/{instance_id}"
+    lines = task_toml.read_text(encoding="utf-8").splitlines(keepends=True)
+    section = ""
+    replaced = False
+    output: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped
+        if section == "[task]" and stripped.startswith("name ="):
+            newline = "\n" if line.endswith("\n") else ""
+            output.append(f'name = "{normalized_name}"{newline}')
+            replaced = True
+        else:
+            output.append(line)
+    if replaced:
+        task_toml.write_text("".join(output), encoding="utf-8")
+        return normalized_name
+    return None
+
+
 def package_instance(
     family: str, instance_dir: Path, condition: str, output: Path
 ) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="skilllearnbench-ap-") as tmp:
         staged = Path(tmp) / instance_dir.name
         shutil.copytree(instance_dir, staged)
+        harbor_task_name = normalize_harbor_task_name(
+            staged / "task.toml", instance_dir.name
+        )
         staged_skills = staged / "environment" / "skills"
         if staged_skills.exists():
             shutil.rmtree(staged_skills)
@@ -118,6 +159,7 @@ def package_instance(
             "archive": archive.relative_to(output).as_posix(),
             "archive_bytes": archive.stat().st_size,
             "archive_sha256": sha256(archive),
+            "harbor_task_name": harbor_task_name,
             "skill_files": skill_files,
         }
 
