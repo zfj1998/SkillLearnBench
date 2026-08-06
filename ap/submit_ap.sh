@@ -59,9 +59,14 @@ make_params() {
   for instance in "$@"; do
     [[ "${first}" == true ]] || printf ',\n' >> "${output}"
     first=false
-    extra='{}'
+    # The pinned generic template appends /v1 for native Claude Code, while
+    # Claude Code 2.1.220 appends /v1/messages itself. Forward the canonical
+    # Routify base directly to the agent process to avoid /v1/v1/messages.
+    extra="$(jq -cn --arg base_url "${MODEL_BASE_URL}" \
+      '{ANTHROPIC_BASE_URL:$base_url}')"
     if [[ "${instance}" == github-repo-analytics-* ]]; then
-      extra="$(jq -cn --arg token "${GH_TOKEN}" '{GH_TOKEN:$token}')"
+      extra="$(jq -cn --arg base_url "${MODEL_BASE_URL}" --arg token "${GH_TOKEN}" \
+        '{ANTHROPIC_BASE_URL:$base_url,GH_TOKEN:$token}')"
     fi
     jq -cn --arg id "${instance}" --arg split "${condition}" \
       --argjson agent_extra_env "${extra}" \
