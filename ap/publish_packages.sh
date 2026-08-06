@@ -32,7 +32,6 @@ ap job create skilllearnbench-dataset-publish \
   --agenthub-ref "${AGENTHUB_REF}" \
   --instance-id publish \
   --params "${params}" \
-  --suite-name "${name}" \
   --queue "${AP_QUEUE}" \
   --priority medium \
   --format json | tee "${response}"
