@@ -167,8 +167,27 @@ case "${MODE}" in
     submit_condition no_skill full "${CONCURRENCY:-20}" "${ALL_INSTANCES[@]}"
     submit_condition human_authored full "${CONCURRENCY:-20}" "${ALL_INSTANCES[@]}"
     ;;
+  retry)
+    CONDITION="${2:-}"
+    shift 2 || true
+    [[ "${CONDITION}" == no_skill || "${CONDITION}" == human_authored ]] || {
+      echo "retry condition must be no_skill or human_authored" >&2
+      exit 2
+    }
+    [[ "$#" -gt 0 ]] || {
+      echo "retry requires at least one instance id" >&2
+      exit 2
+    }
+    for instance in "$@"; do
+      printf '%s\n' "${ALL_INSTANCES[@]}" | grep -Fqx -- "${instance}" || {
+        echo "unknown instance for retry: ${instance}" >&2
+        exit 2
+      }
+    done
+    submit_condition "${CONDITION}" retry "${CONCURRENCY:-5}" "$@"
+    ;;
   *)
-    echo "usage: REASONING_EFFORT=<level> $0 {dry-run|smoke|full}" >&2
+    echo "usage: REASONING_EFFORT=<level> $0 {dry-run|smoke|full|retry CONDITION INSTANCE...}" >&2
     exit 2
     ;;
 esac
