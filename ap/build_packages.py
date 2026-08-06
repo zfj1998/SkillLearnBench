@@ -111,6 +111,14 @@ def normalize_harbor_task_name(task_toml: Path, instance_id: str) -> str | None:
     return None
 
 
+def ensure_trailing_newline(path: Path) -> bool:
+    content = path.read_bytes()
+    if content.endswith(b"\n"):
+        return False
+    path.write_bytes(content + b"\n")
+    return True
+
+
 def package_instance(
     family: str, instance_dir: Path, condition: str, output: Path
 ) -> dict[str, object]:
@@ -119,6 +127,9 @@ def package_instance(
         shutil.copytree(instance_dir, staged)
         harbor_task_name = normalize_harbor_task_name(
             staged / "task.toml", instance_dir.name
+        )
+        dockerfile_newline_added = ensure_trailing_newline(
+            staged / "environment" / "Dockerfile"
         )
         staged_skills = staged / "environment" / "skills"
         if staged_skills.exists():
@@ -160,6 +171,7 @@ def package_instance(
             "archive_bytes": archive.stat().st_size,
             "archive_sha256": sha256(archive),
             "harbor_task_name": harbor_task_name,
+            "dockerfile_trailing_newline_added": dockerfile_newline_added,
             "skill_files": skill_files,
         }
 
