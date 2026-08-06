@@ -13,6 +13,7 @@ RUN apt-get update -y && \
     apt-get clean
 
 ENV PATH="/root/.local/share/coursier/bin:$PATH"
+ENV COURSIER_REPOSITORIES="https://maven.aliyun.com/repository/public"
 RUN set -eux; \
     ARCH="$(dpkg --print-architecture)"; \
     case "$ARCH" in \
@@ -23,7 +24,6 @@ RUN set -eux; \
     curl -fL "https://github.com/coursier/coursier/releases/download/v2.1.25-M23/cs-${CS_ARCH}-pc-linux.gz" \
       | gzip -d > cs; \
     chmod +x cs; \
-    ./cs setup --yes; \
     ./cs install scala:2.13.12 scalac:2.13.12
 
 # Pin Python dependencies with explicit versions
