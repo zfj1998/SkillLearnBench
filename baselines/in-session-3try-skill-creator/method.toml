@@ -1,0 +1,3 @@
+max_rounds = 3
+isolated_verifier = true
+

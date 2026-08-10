@@ -651,6 +651,7 @@ def run_task(task_id: str, *, agent_id: str = "codex", model: str | None = None,
     method_cfg: dict = {}
     method_plugin = None
     if method:
+        method_cfg = _load_method_config(method)
         method_plugin = _load_method_plugin(method)
         if method_plugin is not None:
             # Plugin methods build their own instructions; no static method.md injection.
@@ -661,7 +662,6 @@ def run_task(task_id: str, *, agent_id: str = "codex", model: str | None = None,
                 print(f"Method not found: {method} (expected {method_file})", file=sys.stderr)
                 return 2, {}
             method_text = method_file.read_text(encoding="utf-8").strip()
-            method_cfg = _load_method_config(method)
             # If max_rounds is declared, substitute {max_rounds} in method.md.
             # Presence of max_rounds is the signal that this method is round-based.
             if "max_rounds" in method_cfg:
@@ -728,7 +728,9 @@ def run_task(task_id: str, *, agent_id: str = "codex", model: str | None = None,
     else:
         print(f"[1/5] Using prebuilt image: {image_tag}")
 
-    # Run container (detached, with /logs and /tests mounts)
+    # Run container.  Methods with an isolated verifier must never mount hidden
+    # tests into the agent container; their plugin snapshots the stopped agent
+    # filesystem and verifies that snapshot in a disposable sibling container.
     print(f"[2/5] Starting container...")
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
     # Pass env vars explicitly so Docker gets the values
@@ -737,21 +739,25 @@ def run_task(task_id: str, *, agent_id: str = "codex", model: str | None = None,
         val = os.environ.get(env_var)
         if val:
             env_args.extend(["-e", f"{env_var}={val}"])
+    for env_var in agent.get("passthrough_env", []):
+        val = os.environ.get(env_var)
+        if val:
+            env_args.extend(["-e", f"{env_var}={val}"])
     # Pass task-required env vars into the container.
     for env_var in task_cfg.get("environment", {}).get("required_env", []):
         val = os.environ.get(env_var)
         if val:
             env_args.extend(["-e", f"{env_var}={val}"])
-    r = subprocess.run(
-        [
+    container_args = [
             "docker", "run", "-d",
             "--name", container_name,
-            "-v", f"{task_path / 'tests'}:/tests:ro",
             "-v", f"{trial_path}:/logs",
-            *env_args,
-            image_tag,
-            "sleep", "3600",
-        ],
+        ]
+    if not (method_plugin is not None and method_cfg.get("isolated_verifier") is True):
+        container_args.extend(["-v", f"{task_path / 'tests'}:/tests:ro"])
+    container_args.extend([*env_args, image_tag, "sleep", "3600"])
+    r = subprocess.run(
+        container_args,
         capture_output=True,
         text=True,
     )
