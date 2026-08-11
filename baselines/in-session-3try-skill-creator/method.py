@@ -331,47 +331,112 @@ def _verify_snapshot(
     return passed, feedback, result.returncode
 
 
-def _validate_skills(container: str, workdir: str) -> list[str]:
+def _classify_skill_candidate(contents: dict[str, str]) -> dict[str, Any]:
+    errors: list[str] = []
+    if not contents:
+        return {
+            "valid": False,
+            "status": "no_skill_created",
+            "candidate_skills": [],
+            "skills": [],
+            "validation_errors": ["Skill Creator produced no SKILL.md files"],
+        }
+    if len(contents) > 5:
+        errors.append(f"Skill Creator produced {len(contents)} SKILL.md files; maximum is 5")
+    for path, content in sorted(contents.items()):
+        if not content.startswith("---"):
+            errors.append(f"missing YAML frontmatter: {path}")
+        if not re.search(r"(?m)^name:\s*\S+", content):
+            errors.append(f"missing frontmatter name: {path}")
+        if not re.search(r"(?m)^description:\s*\S+", content):
+            errors.append(f"missing frontmatter description: {path}")
+    valid = not errors
+    return {
+        "valid": valid,
+        "status": "valid" if valid else "invalid_skill_candidate",
+        "candidate_skills": sorted(contents),
+        "skills": sorted(contents) if valid else [],
+        "validation_errors": errors,
+    }
+
+
+def _capture_skill_candidate(
+    container: str, workdir: str, trial_path: Path,
+) -> tuple[dict[str, Any], Path]:
+    skill_root = f"{workdir}/environment/skills"
+    subprocess.run(
+        ["docker", "exec", container, "mkdir", "-p", skill_root],
+        check=True, capture_output=True, text=True,
+    )
     result = subprocess.run(
-        ["docker", "exec", container, "find", f"{workdir}/environment/skills", "-type", "f", "-name", "SKILL.md"],
+        ["docker", "exec", container, "find", skill_root, "-type", "f", "-name", "SKILL.md"],
         capture_output=True,
         text=True,
+        check=True,
     )
     paths = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if not 1 <= len(paths) <= 5:
-        raise RuntimeError(f"Skill Creator must produce 1-5 SKILL.md files; found {len(paths)}")
+    contents: dict[str, str] = {}
     for path in paths:
-        content = subprocess.run(
+        contents[path] = subprocess.run(
             ["docker", "exec", container, "cat", path], capture_output=True, text=True, check=True
         ).stdout
-        if not content.startswith("---") or not re.search(r"(?m)^name:\s*\S+", content) or not re.search(r"(?m)^description:\s*\S+", content):
-            raise RuntimeError(f"Invalid skill frontmatter: {path}")
-    return paths
-
-
-def _heldout_eval(
-    *, generation_container: str, task_path: Path, trial_path: Path,
-    agent: dict[str, Any], model_name: str, task_workdir: str, max_steps: int,
-) -> dict[str, Any]:
-    family = task_path.parent.name
-    heldout_path = task_path.parent / f"{family}-2"
-    if not (heldout_path / "instruction.md").exists():
-        raise RuntimeError(f"Held-out instance is missing: {heldout_path}")
+    candidate_dir = trial_path / "reflection-candidate"
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["docker", "cp", f"{container}:{skill_root}/.", str(candidate_dir)],
+        check=True, capture_output=True, text=True,
+    )
+    classification = _classify_skill_candidate(contents)
+    unsafe_links = [
+        str(path.relative_to(candidate_dir))
+        for path in candidate_dir.rglob("*") if path.is_symlink()
+    ]
+    oversized = [
+        str(path.relative_to(candidate_dir))
+        for path in candidate_dir.rglob("*")
+        if path.is_file() and not path.is_symlink() and path.stat().st_size > 128 * 1024
+    ]
+    if unsafe_links or oversized:
+        classification["valid"] = False
+        classification["status"] = "invalid_skill_candidate"
+        classification["skills"] = []
+        classification["validation_errors"].extend(
+            [f"symlink is not allowed: {path}" for path in unsafe_links]
+            + [f"candidate file exceeds 128 KiB: {path}" for path in oversized]
+        )
+    (trial_path / "skill-candidate-validation.json").write_text(
+        json.dumps(classification, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     frozen = trial_path / "frozen-skills"
     frozen.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["docker", "cp", f"{generation_container}:{task_workdir}/environment/skills/.", str(frozen)],
-        check=True, capture_output=True, text=True,
-    )
-    frozen_hashes: dict[str, str] = {}
-    for skill in sorted(frozen.rglob("SKILL.md")):
-        frozen_hashes[str(skill.relative_to(frozen))] = hashlib.sha256(skill.read_bytes()).hexdigest()
+    if classification["valid"]:
+        shutil.copytree(candidate_dir, frozen, dirs_exist_ok=True)
+    return classification, frozen
+
+
+def _file_hashes(root: Path) -> dict[str, str]:
+    return {
+        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*")) if path.is_file()
+    }
+
+
+def _heldout_eval(
+    *, task_path: Path, trial_path: Path, frozen: Path, instance_number: int,
+    agent: dict[str, Any], model_name: str, max_steps: int,
+) -> dict[str, Any]:
+    family = task_path.parent.name
+    heldout_path = task_path.parent / f"{family}-{instance_number}"
+    if not (heldout_path / "instruction.md").exists():
+        raise RuntimeError(f"Held-out instance is missing: {heldout_path}")
+
+    frozen_hashes = _file_hashes(frozen)
 
     build_root = Path(tempfile.mkdtemp(prefix="selfgen_heldout_build_"))
     image = f"skilllearn-selfgen-heldout-{uuid.uuid4().hex[:12]}"
     container = f"skilllearn-selfgen-heldout-{uuid.uuid4().hex[:12]}"
-    heldout_log = trial_path / "heldout-instance-2"
+    heldout_log = trial_path / f"heldout-instance-{instance_number}"
     heldout_log.mkdir(parents=True, exist_ok=True)
     try:
         build_env = build_root / "environment"
@@ -426,6 +491,20 @@ def _heldout_eval(
         subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         subprocess.run(["docker", "image", "rm", "-f", image], capture_output=True)
         shutil.rmtree(build_root, ignore_errors=True)
+
+
+def _evaluate_heldouts(
+    *, task_path: Path, trial_path: Path, frozen: Path,
+    agent: dict[str, Any], model_name: str, max_steps: int,
+) -> list[dict[str, Any]]:
+    return [
+        _heldout_eval(
+            task_path=task_path, trial_path=trial_path, frozen=frozen,
+            instance_number=instance_number, agent=agent,
+            model_name=model_name, max_steps=max_steps,
+        )
+        for instance_number in range(2, 6)
+    ]
 
 
 def run(
@@ -500,19 +579,42 @@ def run(
         container=container_name, session_id=session_id, destination=reflection_session_path,
         expected_prompt=reflection, previous_path=previous_session_path,
     ))
-    skills = _validate_skills(container_name, task_workdir)
-    heldout = _heldout_eval(
-        generation_container=container_name, task_path=task_path, trial_path=trial_path,
-        agent=agent, model_name=model_name, task_workdir=task_workdir, max_steps=max_steps,
+    if rc != 0:
+        raise RuntimeError(f"Skill Creator reflection failed with agent exit {rc}")
+    skill_candidate, frozen = _capture_skill_candidate(
+        container_name, task_workdir, trial_path,
     )
+    frozen_before = _file_hashes(frozen)
+    heldouts = _evaluate_heldouts(
+        task_path=task_path, trial_path=trial_path, frozen=frozen,
+        agent=agent, model_name=model_name, max_steps=max_steps,
+    )
+    frozen_after = _file_hashes(frozen)
+    if frozen_after != frozen_before:
+        raise RuntimeError("Frozen skill library mutated during held-out evaluation")
+    heldout_session_ids = [item["session_id"] for item in heldouts]
+    if len(set(heldout_session_ids)) != 4 or session_id in heldout_session_ids:
+        raise RuntimeError("Held-out evaluations did not use four distinct fresh sessions")
+    family = task_path.parent.name
+    expected_heldouts = [f"{family}-{number}" for number in range(2, 6)]
+    if [item["instance_id"] for item in heldouts] != expected_heldouts:
+        raise RuntimeError("Held-out instance coverage or order mismatch")
+    heldout_pass_count = sum(item["verifier_passed"] is True for item in heldouts)
     audit = {
-        "protocol": "in-session-3try-skill-creator",
+        "protocol": "in-session-3try-skill-creator-family-v1",
         "scoreable": False,
+        "family_id": family,
         "session_id": session_id,
         "attempts_used": len(list(audit_dir.glob("attempt-*"))),
         "terminal_verifier_passed": passed,
         "reflection_exit": rc,
-        "skills": skills,
+        "skill_generation_valid": skill_candidate["valid"],
+        "skill_generation_status": skill_candidate["status"],
+        "skills": skill_candidate["skills"],
+        "candidate_skills": skill_candidate["candidate_skills"],
+        "skill_validation_errors": skill_candidate["validation_errors"],
+        "frozen_skill_sha256": frozen_before,
+        "frozen_library_unchanged": True,
         "hidden_tests_mounted_in_agent": False,
         "verifier_exit": verifier_exit,
         "parent_continuity_verified": all(
@@ -528,7 +630,11 @@ def run(
             item["tool_links_verified"] for item in session_snapshots
         ),
         "session_snapshots": session_snapshots,
-        "heldout": heldout,
+        "heldouts": heldouts,
+        "heldout_expected": expected_heldouts,
+        "heldout_pass_count": heldout_pass_count,
+        "heldout_total": 4,
+        "heldout_score": heldout_pass_count / 4,
     }
     (trial_path / "selfgen_audit.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
     # The plugin contract's rounds field is the scientific solve-attempt count.

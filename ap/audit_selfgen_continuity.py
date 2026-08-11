@@ -58,6 +58,88 @@ def audit_trial(trial: Path) -> dict:
     ):
         if source.get(key) is not result[key]:
             raise RuntimeError(f"Runtime and offline continuity results disagree for {key}")
+
+    heldouts = source.get("heldouts")
+    if heldouts is not None:
+        family = source.get("family_id")
+        expected = [f"{family}-{number}" for number in range(2, 6)]
+        if source.get("heldout_expected") != expected:
+            raise RuntimeError("Runtime held-out expectation does not cover family instances 2-5")
+        if not isinstance(heldouts, list) or [x.get("instance_id") for x in heldouts] != expected:
+            raise RuntimeError("Held-out artifact coverage or order mismatch")
+        sessions = [x.get("session_id") for x in heldouts]
+        if any(not isinstance(x, str) or not x for x in sessions):
+            raise RuntimeError("Held-out session identity is missing")
+        if len(set(sessions)) != 4 or session_id in sessions:
+            raise RuntimeError("Held-out sessions are not four distinct fresh sessions")
+        if source.get("frozen_library_unchanged") is not True:
+            raise RuntimeError("Frozen library mutation proof is absent")
+        frozen_hashes = source.get("frozen_skill_sha256")
+        if not isinstance(frozen_hashes, dict):
+            raise RuntimeError("Frozen library manifest is malformed")
+        actual_frozen_hashes = METHOD._file_hashes(trial / "frozen-skills")
+        if actual_frozen_hashes != frozen_hashes:
+            raise RuntimeError("Frozen library files disagree with the runtime manifest")
+        if any(x.get("frozen_skill_sha256") != frozen_hashes for x in heldouts):
+            raise RuntimeError("Held-out frozen library manifests disagree")
+
+        pass_count = 0
+        tests_path_mentions = 0
+        for number, item in zip(range(2, 6), heldouts, strict=True):
+            if item.get("hidden_tests_mounted_in_agent") is not False:
+                raise RuntimeError(f"Hidden test isolation proof is absent for held-out {number}")
+            verifier = (
+                trial / f"heldout-instance-{number}" / "same-session-attempts"
+                / "attempt-01" / "verifier"
+            )
+            reward = (verifier / "reward.txt").read_text(encoding="utf-8").strip()
+            evidence_passed = reward == "1"
+            if item.get("verifier_passed") is not evidence_passed:
+                raise RuntimeError(f"Held-out {number} verifier report disagrees with reward.txt")
+            if not (verifier / "ctrf.json").is_file():
+                raise RuntimeError(f"Held-out {number} CTRF evidence is missing")
+            if evidence_passed:
+                pass_count += 1
+            agent_text = (trial / f"heldout-instance-{number}" / "agent.jsonl").read_text(
+                encoding="utf-8"
+            )
+            tests_path_mentions += agent_text.count("/tests")
+        if tests_path_mentions:
+            raise RuntimeError("Held-out agent trajectory mentions the hidden /tests path")
+        score = pass_count / 4
+        if (
+            source.get("heldout_pass_count") != pass_count
+            or source.get("heldout_total") != 4
+            or source.get("heldout_score") != score
+        ):
+            raise RuntimeError("Held-out aggregate disagrees with verifier evidence")
+        if source.get("skill_generation_valid") is not (source.get("skill_generation_status") == "valid"):
+            raise RuntimeError("Skill-generation validity and status disagree")
+        candidate_validation = json.loads(
+            (trial / "skill-candidate-validation.json").read_text(encoding="utf-8")
+        )
+        for key in ("valid", "status", "skills", "candidate_skills", "validation_errors"):
+            source_key = {
+                "valid": "skill_generation_valid",
+                "status": "skill_generation_status",
+                "validation_errors": "skill_validation_errors",
+            }.get(key, key)
+            if candidate_validation.get(key) != source.get(source_key):
+                raise RuntimeError(f"Skill candidate validation disagrees for {key}")
+        if source.get("skill_generation_valid") is False and frozen_hashes:
+            raise RuntimeError("Invalid skill candidate leaked into the frozen library")
+        result.update({
+            "family_id": family,
+            "heldout_instances_verified": expected,
+            "heldout_fresh_sessions_verified": True,
+            "frozen_library_unchanged_verified": True,
+            "heldout_hidden_tests_isolated": True,
+            "heldout_pass_count": pass_count,
+            "heldout_total": 4,
+            "heldout_score": score,
+            "skill_generation_valid": source.get("skill_generation_valid"),
+            "skill_generation_status": source.get("skill_generation_status"),
+        })
     return result
 
 

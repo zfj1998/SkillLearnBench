@@ -120,3 +120,45 @@ def test_rejects_missing_exact_appended_prompt(tmp_path):
         METHOD._audit_session_snapshot(
             second, session_id=SESSION, expected_prompt="reflect", previous_path=first
         )
+
+
+def test_skill_candidate_classification_keeps_invalid_output_as_model_behavior():
+    empty = METHOD._classify_skill_candidate({})
+    assert empty["valid"] is False
+    assert empty["status"] == "no_skill_created"
+    assert empty["skills"] == []
+
+    invalid = METHOD._classify_skill_candidate({"/root/skills/bad/SKILL.md": "no frontmatter"})
+    assert invalid["valid"] is False
+    assert invalid["status"] == "invalid_skill_candidate"
+    assert invalid["candidate_skills"] == ["/root/skills/bad/SKILL.md"]
+    assert invalid["skills"] == []
+
+    valid = METHOD._classify_skill_candidate({
+        "/root/skills/good/SKILL.md": "---\nname: good\ndescription: reusable guidance\n---\n"
+    })
+    assert valid["valid"] is True
+    assert valid["status"] == "valid"
+    assert valid["skills"] == ["/root/skills/good/SKILL.md"]
+
+
+def test_evaluate_heldouts_covers_instances_two_through_five(monkeypatch, tmp_path):
+    seen = []
+
+    def fake_heldout_eval(**kwargs):
+        seen.append(kwargs["instance_number"])
+        return {"instance_id": f"family-{kwargs['instance_number']}"}
+
+    monkeypatch.setattr(METHOD, "_heldout_eval", fake_heldout_eval)
+    results = METHOD._evaluate_heldouts(
+        task_path=tmp_path / "family/family-1",
+        trial_path=tmp_path,
+        frozen=tmp_path / "frozen",
+        agent={},
+        model_name="model",
+        max_steps=1,
+    )
+    assert seen == [2, 3, 4, 5]
+    assert [item["instance_id"] for item in results] == [
+        "family-2", "family-3", "family-4", "family-5"
+    ]
