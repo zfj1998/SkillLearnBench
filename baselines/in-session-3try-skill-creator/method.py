@@ -7,8 +7,8 @@ against a committed filesystem snapshot in a disposable sibling container.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -428,6 +428,7 @@ def run(
             )
         phase_dir = audit_dir / f"attempt-{attempt:02d}"
         phase_dir.mkdir(parents=True, exist_ok=True)
+        (phase_dir / "phase-prompt.txt").write_text(prompt, encoding="utf-8")
         rc, out, err, steps = _claude_turn(
             container=container_name, agent=agent, model=model_name, prompt=prompt,
             session_id=session_id, resume=attempt > 1, max_steps=max_steps,
@@ -456,6 +457,7 @@ def run(
         f"1-5 skills under {task_workdir}/environment/skills/<skill-name>/SKILL.md. Generalize to "
         "sibling instances; do not include the specific poem or hidden-test guesses."
     )
+    (trial_path / "reflection-prompt.txt").write_text(reflection, encoding="utf-8")
     rc, out, err, steps = _claude_turn(
         container=container_name, agent=agent, model=model_name, prompt=reflection,
         session_id=session_id, resume=True, max_steps=max_steps,

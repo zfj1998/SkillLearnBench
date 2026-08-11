@@ -12,3 +12,9 @@ strict non-empty byte-prefix extension of the prior export, every main-chain
 message has the immediately preceding parent UUID, the exact phase prompt is
 present once in the appended suffix, and every tool result links to an earlier
 tool call. These snapshots are retained as protocol evidence.
+
+The downloaded trial can be independently checked with:
+
+```bash
+python ap/audit_selfgen_continuity.py /path/to/trial-directory
+```
