@@ -8,6 +8,7 @@ against a committed filesystem snapshot in a disposable sibling container.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shlex
@@ -17,6 +18,171 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
+
+
+_SESSION_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+
+
+def _jsonl_records(path: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid Claude session JSONL at {path}:{line_number}") from exc
+        if not isinstance(value, dict):
+            raise RuntimeError(f"Non-object Claude session record at {path}:{line_number}")
+        records.append(value)
+    if not records:
+        raise RuntimeError(f"Empty Claude session export: {path}")
+    return records
+
+
+def _message_text(record: dict[str, Any]) -> str:
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        part["text"] for part in content
+        if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+    )
+
+
+def _tool_links(records: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
+    calls: set[str] = set()
+    results: set[str] = set()
+    for record in records:
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "tool_use" and isinstance(part.get("id"), str):
+                if part["id"] in calls:
+                    raise RuntimeError(f"Duplicate tool_use id in Claude session: {part['id']}")
+                calls.add(part["id"])
+            if part.get("type") == "tool_result" and isinstance(part.get("tool_use_id"), str):
+                tool_id = part["tool_use_id"]
+                if tool_id not in calls:
+                    raise RuntimeError(f"Tool result precedes or lacks tool_use: {tool_id}")
+                results.add(tool_id)
+    return calls, results
+
+
+def _audit_session_snapshot(
+    path: Path, *, session_id: str, expected_prompt: str,
+    previous_path: Path | None = None,
+) -> dict[str, Any]:
+    """Validate one append-only Claude transcript snapshot, failing closed."""
+    raw = path.read_bytes()
+    previous_records: list[dict[str, Any]] = []
+    previous_raw = b""
+    if previous_path is not None:
+        previous_raw = previous_path.read_bytes()
+        previous_records = _jsonl_records(previous_path)
+        if len(raw) <= len(previous_raw) or not raw.startswith(previous_raw):
+            raise RuntimeError("Claude session snapshot is not a strict byte prefix extension")
+
+    records = _jsonl_records(path)
+    uuids: set[str] = set()
+    main_chain: list[dict[str, Any]] = []
+    for record in records:
+        record_session = record.get("sessionId")
+        if record_session is not None and record_session != session_id:
+            raise RuntimeError(
+                f"Claude transcript session mismatch: expected {session_id}, saw {record_session}"
+            )
+        record_uuid = record.get("uuid")
+        if not isinstance(record_uuid, str) or not record_uuid:
+            continue
+        if record_uuid in uuids:
+            raise RuntimeError(f"Duplicate Claude transcript uuid: {record_uuid}")
+        parent = record.get("parentUuid")
+        if parent is not None and parent not in uuids:
+            raise RuntimeError(f"Broken Claude transcript parent link: {record_uuid} -> {parent}")
+        uuids.add(record_uuid)
+        if record.get("isSidechain") is not True:
+            if not main_chain:
+                if parent is not None:
+                    raise RuntimeError("Claude transcript main chain has no root")
+            elif parent != main_chain[-1]["uuid"]:
+                raise RuntimeError(
+                    f"Non-contiguous Claude transcript main chain: {record_uuid} -> {parent}"
+                )
+            main_chain.append(record)
+    if not main_chain:
+        raise RuntimeError("Claude transcript contains no main-chain messages")
+
+    previous_count = len(previous_records)
+    appended = records[previous_count:]
+    prompt_records = [
+        record for record in appended
+        if record.get("type") == "user" and _message_text(record) == expected_prompt
+    ]
+    if len(prompt_records) != 1:
+        raise RuntimeError(
+            f"Expected exactly one appended user prompt in Claude transcript; found {len(prompt_records)}"
+        )
+
+    calls, results = _tool_links(records)
+    missing_results = sorted(calls - results)
+    if missing_results:
+        raise RuntimeError(f"Claude transcript has unresolved tool calls: {missing_results[:5]}")
+
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "bytes": len(raw),
+        "records": len(records),
+        "appended_records": len(records) - previous_count,
+        "main_chain_messages": len(main_chain),
+        "leaf_uuid": main_chain[-1]["uuid"],
+        "parent_links_verified": True,
+        "prefix_verified": previous_path is None or True,
+        "prompt_verified": True,
+        "tool_links_verified": True,
+        "tool_calls": len(calls),
+    }
+
+
+def _export_and_audit_session(
+    *, container: str, session_id: str, destination: Path, expected_prompt: str,
+    previous_path: Path | None,
+) -> dict[str, Any]:
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        raise RuntimeError(f"Unsafe Claude session id: {session_id!r}")
+    find_result = subprocess.run(
+        [
+            "docker", "exec", container, "sh", "-c",
+            'root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; '
+            'test -d "$root/projects" && find "$root/projects" -type f -name "$1.jsonl" -print',
+            "sh", session_id,
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    matches = [line.strip() for line in find_result.stdout.splitlines() if line.strip()]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Expected one native Claude transcript for {session_id}; found {len(matches)}"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["docker", "cp", f"{container}:{matches[0]}", str(destination)],
+        capture_output=True, text=True, check=True,
+    )
+    return _audit_session_snapshot(
+        destination, session_id=session_id, expected_prompt=expected_prompt,
+        previous_path=previous_path,
+    )
 
 
 def _allowed_tools(agent: dict[str, Any], task_path: Path) -> str:
@@ -170,7 +336,6 @@ def _heldout_eval(
         check=True, capture_output=True, text=True,
     )
     frozen_hashes: dict[str, str] = {}
-    import hashlib
     for skill in sorted(frozen.rglob("SKILL.md")):
         frozen_hashes[str(skill.relative_to(frozen))] = hashlib.sha256(skill.read_bytes()).hexdigest()
 
@@ -249,6 +414,8 @@ def run(
     passed = False
     feedback = ""
     verifier_exit = 0
+    session_snapshots: list[dict[str, Any]] = []
+    previous_session_path: Path | None = None
 
     for attempt in range(1, attempts + 1):
         if attempt == 1:
@@ -270,6 +437,12 @@ def run(
         stdout_parts.append(out)
         stderr_parts.append(err)
         (phase_dir / "agent-exit.txt").write_text(str(rc), encoding="utf-8")
+        session_path = phase_dir / "claude-session.jsonl"
+        session_snapshots.append(_export_and_audit_session(
+            container=container_name, session_id=session_id, destination=session_path,
+            expected_prompt=prompt, previous_path=previous_session_path,
+        ))
+        previous_session_path = session_path
         passed, feedback, verifier_exit = _verify_snapshot(
             container=container_name, task_path=task_path, trial_path=trial_path, attempt=attempt
         )
@@ -291,6 +464,11 @@ def run(
     total_steps += steps
     stdout_parts.append(out)
     stderr_parts.append(err)
+    reflection_session_path = trial_path / "reflection-session.jsonl"
+    session_snapshots.append(_export_and_audit_session(
+        container=container_name, session_id=session_id, destination=reflection_session_path,
+        expected_prompt=reflection, previous_path=previous_session_path,
+    ))
     skills = _validate_skills(container_name, task_workdir)
     heldout = _heldout_eval(
         generation_container=container_name, task_path=task_path, trial_path=trial_path,
@@ -306,6 +484,19 @@ def run(
         "skills": skills,
         "hidden_tests_mounted_in_agent": False,
         "verifier_exit": verifier_exit,
+        "parent_continuity_verified": all(
+            item["parent_links_verified"] for item in session_snapshots
+        ),
+        "prefix_continuity_verified": all(
+            item["prefix_verified"] for item in session_snapshots[1:]
+        ),
+        "prompt_continuity_verified": all(
+            item["prompt_verified"] for item in session_snapshots
+        ),
+        "tool_link_continuity_verified": all(
+            item["tool_links_verified"] for item in session_snapshots
+        ),
+        "session_snapshots": session_snapshots,
         "heldout": heldout,
     }
     (trial_path / "selfgen_audit.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
