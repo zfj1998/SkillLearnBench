@@ -94,13 +94,21 @@ def _audit_session_snapshot(
 
     records = _jsonl_records(path)
     uuids: set[str] = set()
-    main_chain: list[dict[str, Any]] = []
+    parents: dict[str, str | None] = {}
+    main_records: list[dict[str, Any]] = []
+    last_prompt_leaves: list[tuple[int, str]] = []
     for record in records:
         record_session = record.get("sessionId")
         if record_session is not None and record_session != session_id:
             raise RuntimeError(
                 f"Claude transcript session mismatch: expected {session_id}, saw {record_session}"
             )
+        if record.get("type") == "last-prompt":
+            leaf_uuid = record.get("leafUuid")
+            if not isinstance(leaf_uuid, str) or leaf_uuid not in uuids:
+                raise RuntimeError(f"Invalid Claude transcript last-prompt leaf: {leaf_uuid}")
+            last_prompt_leaves.append((len(main_records), leaf_uuid))
+
         record_uuid = record.get("uuid")
         if not isinstance(record_uuid, str) or not record_uuid:
             continue
@@ -110,17 +118,16 @@ def _audit_session_snapshot(
         if parent is not None and parent not in uuids:
             raise RuntimeError(f"Broken Claude transcript parent link: {record_uuid} -> {parent}")
         uuids.add(record_uuid)
+        parents[record_uuid] = parent
         if record.get("isSidechain") is not True:
-            if not main_chain:
+            if not main_records:
                 if parent is not None:
-                    raise RuntimeError("Claude transcript main chain has no root")
-            elif parent != main_chain[-1]["uuid"]:
-                raise RuntimeError(
-                    f"Non-contiguous Claude transcript main chain: {record_uuid} -> {parent}"
-                )
-            main_chain.append(record)
-    if not main_chain:
-        raise RuntimeError("Claude transcript contains no main-chain messages")
+                    raise RuntimeError("Claude transcript parent graph has no root")
+            elif parent is None:
+                raise RuntimeError(f"Unexpected second Claude transcript root: {record_uuid}")
+            main_records.append(record)
+    if not main_records or not last_prompt_leaves:
+        raise RuntimeError("Claude transcript lacks main messages or a terminal leaf marker")
 
     previous_count = len(previous_records)
     appended = records[previous_count:]
@@ -132,6 +139,28 @@ def _audit_session_snapshot(
         raise RuntimeError(
             f"Expected exactly one appended user prompt in Claude transcript; found {len(prompt_records)}"
         )
+    prompt_uuid = prompt_records[0].get("uuid")
+    if not isinstance(prompt_uuid, str) or prompt_uuid not in parents:
+        raise RuntimeError("Appended Claude phase prompt lacks a valid UUID")
+
+    if previous_path is not None:
+        previous_leaves = [
+            record.get("leafUuid") for record in previous_records
+            if record.get("type") == "last-prompt"
+        ]
+        if not previous_leaves or prompt_records[0].get("parentUuid") != previous_leaves[-1]:
+            raise RuntimeError("Claude phase prompt does not continue the previous terminal leaf")
+
+    leaf_uuid = last_prompt_leaves[-1][1]
+    cursor: str | None = leaf_uuid
+    ancestors: set[str] = set()
+    while cursor is not None:
+        if cursor in ancestors:
+            raise RuntimeError(f"Cycle in Claude transcript parent graph at {cursor}")
+        ancestors.add(cursor)
+        cursor = parents[cursor]
+    if prompt_uuid not in ancestors:
+        raise RuntimeError("Claude terminal leaf does not descend from the appended phase prompt")
 
     calls, results = _tool_links(records)
     missing_results = sorted(calls - results)
@@ -144,8 +173,8 @@ def _audit_session_snapshot(
         "bytes": len(raw),
         "records": len(records),
         "appended_records": len(records) - previous_count,
-        "main_chain_messages": len(main_chain),
-        "leaf_uuid": main_chain[-1]["uuid"],
+        "main_graph_messages": len(main_records),
+        "leaf_uuid": leaf_uuid,
         "parent_links_verified": True,
         "prefix_verified": previous_path is None or True,
         "prompt_verified": True,
