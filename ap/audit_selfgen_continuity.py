@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TASKS_ROOT = ROOT / "tasks"
 METHOD_PATH = ROOT / "baselines/in-session-3try-skill-creator/method.py"
 SPEC = importlib.util.spec_from_file_location("selfgen_method", METHOD_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -62,16 +64,32 @@ def audit_trial(trial: Path) -> dict:
     heldouts = source.get("heldouts")
     if heldouts is not None:
         family = source.get("family_id")
-        expected = [f"{family}-{number}" for number in range(2, 6)]
-        if source.get("heldout_expected") != expected:
-            raise RuntimeError("Runtime held-out expectation does not cover family instances 2-5")
+        expected = source.get("heldout_expected")
+        if not isinstance(expected, list) or not expected:
+            raise RuntimeError("Runtime held-out expectation is missing")
+        expected_numbers = []
+        for instance_id in expected:
+            match = re.fullmatch(rf"{re.escape(str(family))}-(\d+)", str(instance_id))
+            if not match or int(match.group(1)) == 1:
+                raise RuntimeError(f"Invalid held-out instance identity: {instance_id}")
+            expected_numbers.append(int(match.group(1)))
+        if expected_numbers != sorted(set(expected_numbers)):
+            raise RuntimeError("Runtime held-out expectation is not unique numeric order")
+        task_path = TASKS_ROOT / str(family) / f"{family}-1"
+        repository_numbers = METHOD._family_heldout_numbers(task_path)
+        repository_expected = [f"{family}-{number}" for number in repository_numbers]
+        if expected != repository_expected:
+            raise RuntimeError(
+                "Runtime held-out expectation does not match the benchmark family: "
+                f"expected {repository_expected}, saw {expected}"
+            )
         if not isinstance(heldouts, list) or [x.get("instance_id") for x in heldouts] != expected:
             raise RuntimeError("Held-out artifact coverage or order mismatch")
         sessions = [x.get("session_id") for x in heldouts]
         if any(not isinstance(x, str) or not x for x in sessions):
             raise RuntimeError("Held-out session identity is missing")
-        if len(set(sessions)) != 4 or session_id in sessions:
-            raise RuntimeError("Held-out sessions are not four distinct fresh sessions")
+        if len(set(sessions)) != len(expected) or session_id in sessions:
+            raise RuntimeError("Held-out sessions are not distinct fresh sessions")
         if source.get("frozen_library_unchanged") is not True:
             raise RuntimeError("Frozen library mutation proof is absent")
         frozen_hashes = source.get("frozen_skill_sha256")
@@ -85,7 +103,7 @@ def audit_trial(trial: Path) -> dict:
 
         pass_count = 0
         tests_path_mentions = 0
-        for number, item in zip(range(2, 6), heldouts, strict=True):
+        for number, item in zip(expected_numbers, heldouts, strict=True):
             if item.get("hidden_tests_mounted_in_agent") is not False:
                 raise RuntimeError(f"Hidden test isolation proof is absent for held-out {number}")
             verifier = (
@@ -106,10 +124,10 @@ def audit_trial(trial: Path) -> dict:
             tests_path_mentions += agent_text.count("/tests")
         if tests_path_mentions:
             raise RuntimeError("Held-out agent trajectory mentions the hidden /tests path")
-        score = pass_count / 4
+        score = pass_count / len(expected)
         if (
             source.get("heldout_pass_count") != pass_count
-            or source.get("heldout_total") != 4
+            or source.get("heldout_total") != len(expected)
             or source.get("heldout_score") != score
         ):
             raise RuntimeError("Held-out aggregate disagrees with verifier evidence")
@@ -135,7 +153,7 @@ def audit_trial(trial: Path) -> dict:
             "frozen_library_unchanged_verified": True,
             "heldout_hidden_tests_isolated": True,
             "heldout_pass_count": pass_count,
-            "heldout_total": 4,
+            "heldout_total": len(expected),
             "heldout_score": score,
             "skill_generation_valid": source.get("skill_generation_valid"),
             "skill_generation_status": source.get("skill_generation_status"),

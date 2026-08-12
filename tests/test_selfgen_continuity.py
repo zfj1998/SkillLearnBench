@@ -99,6 +99,43 @@ def test_accepts_parallel_tool_result_parent_graph(tmp_path):
     assert result["parent_links_verified"] is True
 
 
+def test_accepts_compaction_boundary_with_verified_logical_parent(tmp_path):
+    path = tmp_path / "session.jsonl"
+    records = [
+        _record("user", "u1", None, text="solve"),
+        _record("assistant", "a1", "u1", text="working"),
+        {
+            "type": "system", "subtype": "compact_boundary", "uuid": "compact",
+            "parentUuid": None, "logicalParentUuid": "a1", "sessionId": SESSION,
+            "isSidechain": False,
+            "compactMetadata": {"preservedSegment": {"tailUuid": "a1"}},
+        },
+        _record("assistant", "a2", "compact", text="done"),
+        _leaf("a2"),
+    ]
+    _write(path, records)
+    result = METHOD._audit_session_snapshot(path, session_id=SESSION, expected_prompt="solve")
+    assert result["compact_boundaries"] == 1
+    assert result["parent_links_verified"] is True
+
+
+def test_rejects_compaction_boundary_without_verified_logical_parent(tmp_path):
+    path = tmp_path / "session.jsonl"
+    records = [
+        _record("user", "u1", None, text="solve"),
+        {
+            "type": "system", "subtype": "compact_boundary", "uuid": "compact",
+            "parentUuid": None, "logicalParentUuid": "missing", "sessionId": SESSION,
+            "isSidechain": False,
+            "compactMetadata": {"preservedSegment": {"tailUuid": "missing"}},
+        },
+        _leaf("u1"),
+    ]
+    _write(path, records)
+    with pytest.raises(RuntimeError, match="Invalid Claude compact boundary link"):
+        METHOD._audit_session_snapshot(path, session_id=SESSION, expected_prompt="solve")
+
+
 def test_rejects_unresolved_tool_call(tmp_path):
     path = tmp_path / "session.jsonl"
     _write(path, [
@@ -142,8 +179,24 @@ def test_skill_candidate_classification_keeps_invalid_output_as_model_behavior()
     assert valid["skills"] == ["/root/skills/good/SKILL.md"]
 
 
-def test_evaluate_heldouts_covers_instances_two_through_five(monkeypatch, tmp_path):
+def test_required_task_env_is_read_from_task_toml(tmp_path):
+    task = tmp_path / "family-2"
+    task.mkdir()
+    (task / "task.toml").write_text(
+        '[environment]\nrequired_env = ["GH_TOKEN", "SECOND_TOKEN"]\n'
+    )
+    assert METHOD._required_task_env(task) == ["GH_TOKEN", "SECOND_TOKEN"]
+
+
+@pytest.mark.parametrize("instance_count", [2, 3, 5, 6])
+def test_evaluate_heldouts_covers_all_real_family_instances(monkeypatch, tmp_path, instance_count):
     seen = []
+
+    family = tmp_path / "family"
+    for number in range(1, instance_count + 1):
+        instance = family / f"family-{number}"
+        instance.mkdir(parents=True)
+        (instance / "instruction.md").write_text(f"instance {number}")
 
     def fake_heldout_eval(**kwargs):
         seen.append(kwargs["instance_number"])
@@ -151,14 +204,14 @@ def test_evaluate_heldouts_covers_instances_two_through_five(monkeypatch, tmp_pa
 
     monkeypatch.setattr(METHOD, "_heldout_eval", fake_heldout_eval)
     results = METHOD._evaluate_heldouts(
-        task_path=tmp_path / "family/family-1",
+        task_path=family / "family-1",
         trial_path=tmp_path,
         frozen=tmp_path / "frozen",
         agent={},
         model_name="model",
         max_steps=1,
     )
-    assert seen == [2, 3, 4, 5]
+    assert seen == list(range(2, instance_count + 1))
     assert [item["instance_id"] for item in results] == [
-        "family-2", "family-3", "family-4", "family-5"
+        f"family-{number}" for number in range(2, instance_count + 1)
     ]

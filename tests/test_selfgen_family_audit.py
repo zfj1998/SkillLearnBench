@@ -27,7 +27,14 @@ def _write_jsonl(path, rows):
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
 
-def test_full_family_audit_accepts_invalid_skill_without_dropping_heldouts(tmp_path):
+def test_full_family_audit_accepts_invalid_skill_without_dropping_heldouts(tmp_path, monkeypatch):
+    tasks_root = tmp_path / "tasks"
+    family_root = tasks_root / "family"
+    for number in range(1, 7):
+        instance = family_root / f"family-{number}"
+        instance.mkdir(parents=True)
+        (instance / "instruction.md").write_text(f"instance {number}")
+    monkeypatch.setattr(AUDITOR, "TASKS_ROOT", tasks_root)
     (tmp_path / "frozen-skills").mkdir()
     attempt = tmp_path / "same-session-attempts/attempt-01"
     attempt.mkdir(parents=True)
@@ -47,7 +54,7 @@ def test_full_family_audit_accepts_invalid_skill_without_dropping_heldouts(tmp_p
     (tmp_path / "reflection-prompt.txt").write_text("reflect")
 
     heldouts = []
-    for number in range(2, 6):
+    for number in range(2, 7):
         passed = number % 2 == 0
         root = tmp_path / f"heldout-instance-{number}"
         verifier = root / "same-session-attempts/attempt-01/verifier"
@@ -64,7 +71,7 @@ def test_full_family_audit_accepts_invalid_skill_without_dropping_heldouts(tmp_p
         })
 
     source = {
-        "protocol": "in-session-3try-skill-creator-family-v1",
+        "protocol": "in-session-3try-skill-creator-family-v2",
         "scoreable": False,
         "family_id": "family",
         "session_id": SESSION,
@@ -81,10 +88,10 @@ def test_full_family_audit_accepts_invalid_skill_without_dropping_heldouts(tmp_p
         "frozen_skill_sha256": {},
         "frozen_library_unchanged": True,
         "heldouts": heldouts,
-        "heldout_expected": [f"family-{number}" for number in range(2, 6)],
-        "heldout_pass_count": 2,
-        "heldout_total": 4,
-        "heldout_score": 0.5,
+        "heldout_expected": [f"family-{number}" for number in range(2, 7)],
+        "heldout_pass_count": 3,
+        "heldout_total": 5,
+        "heldout_score": 0.6,
     }
     (tmp_path / "selfgen_audit.json").write_text(json.dumps(source))
     (tmp_path / "skill-candidate-validation.json").write_text(json.dumps({
@@ -96,6 +103,8 @@ def test_full_family_audit_accepts_invalid_skill_without_dropping_heldouts(tmp_p
     }))
     result = AUDITOR.audit_trial(tmp_path)
     assert result["skill_generation_valid"] is False
-    assert result["heldout_instances_verified"] == ["family-2", "family-3", "family-4", "family-5"]
-    assert result["heldout_pass_count"] == 2
-    assert result["heldout_score"] == 0.5
+    assert result["heldout_instances_verified"] == [
+        "family-2", "family-3", "family-4", "family-5", "family-6"
+    ]
+    assert result["heldout_pass_count"] == 3
+    assert result["heldout_score"] == 0.6

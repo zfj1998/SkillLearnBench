@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORKSPACE_DIR="$(cd "${ROOT_DIR}/.." && pwd)"
+ENV_FILE="${ENV_FILE:-${WORKSPACE_DIR}/.env}"
+MODE="${1:-dry-run}"
+FAMILY="${2:-chinese-poem-generator}"
+
+if [[ -f "${ENV_FILE}" ]]; then
+  set +x
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+fi
+
+AP_CLUSTER="${AP_CLUSTER:-hk-test}"
+AP_TEMPLATE="${AP_TEMPLATE:-skilllearnbench-selfgen-smoke}"
+: "${AP_AGENTHUB_REF:?Set AP_AGENTHUB_REF to the pushed 40-character Agent-Hub SHA}"
+: "${BENCHMARK_REVISION:?Set BENCHMARK_REVISION to the pushed 40-character benchmark SHA}"
+[[ "${AP_AGENTHUB_REF}" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid Agent-Hub SHA" >&2; exit 2; }
+[[ "${BENCHMARK_REVISION}" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid benchmark SHA" >&2; exit 2; }
+
+export AP_API_KEY="${AP_API_KEY:-${AP_KEY:-}}"
+: "${AP_API_KEY:?AP_API_KEY or AP_KEY is required}"
+unset AP_HEADERS || true
+MODEL_API_KEY="${MODEL_API_KEY:-${ROUTIFY_MY_KEY_0727:-${ROUTIFY_KEY:-}}}"
+: "${MODEL_API_KEY:?MODEL_API_KEY or a Routify key is required}"
+GH_TOKEN="${GH_TOKEN:-}"
+if [[ -z "${GH_TOKEN}" ]] && command -v gh >/dev/null; then
+  GH_TOKEN="$(gh auth token 2>/dev/null || true)"
+fi
+
+case "${REASONING_EFFORT:-max}" in
+  xhigh|max) ;;
+  *) echo "REASONING_EFFORT must be xhigh or max" >&2; exit 2 ;;
+esac
+case "${MODE}" in
+  dry-run|smoke|full) ;;
+  *) echo "usage: $0 {dry-run|smoke|full} [family]" >&2; exit 2 ;;
+esac
+
+mapfile -t ALL_FAMILIES < <(
+  find "${ROOT_DIR}/tasks" -mindepth 2 -maxdepth 2 -type d -name '*-1' \
+    -printf '%h\n' | xargs -n1 basename | sort
+)
+[[ "${#ALL_FAMILIES[@]}" -eq 20 ]] || {
+  echo "expected 20 families, found ${#ALL_FAMILIES[@]}" >&2
+  exit 2
+}
+
+if [[ "${MODE}" == "full" ]]; then
+  FAMILIES=("${ALL_FAMILIES[@]}")
+else
+  printf '%s\n' "${ALL_FAMILIES[@]}" | grep -Fqx -- "${FAMILY}" || {
+    echo "unknown family: ${FAMILY}" >&2
+    exit 2
+  }
+  FAMILIES=("${FAMILY}")
+fi
+if printf '%s\n' "${FAMILIES[@]}" | grep -Fqx github-repo-analytics; then
+  : "${GH_TOKEN:?Existing gh authentication or GH_TOKEN is required for github-repo-analytics}"
+fi
+
+umask 077
+params_file="$(mktemp /tmp/skilllearnbench-selfgen-params.XXXXXX.json)"
+private_response="$(mktemp /tmp/skilllearnbench-selfgen-response.XXXXXX.json)"
+trap 'rm -f "${params_file}" "${private_response}"' EXIT
+jq -n --argjson families "$(printf '%s\n' "${FAMILIES[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+  --arg github_token "${GH_TOKEN}" \
+  '$families | map(
+    {instance_id: .} +
+    (if . == "github-repo-analytics" then {github_token: $github_token} else {} end)
+  )' > "${params_file}"
+
+common="$(jq -cn \
+  --arg revision "${BENCHMARK_REVISION}" \
+  --arg model "${MODEL:-claude-opus-5}" \
+  --arg base "${MODEL_BASE_URL:-https://routify-pub.alibaba-inc.com/protocol/anthropic}" \
+  --arg api_key "${MODEL_API_KEY}" \
+  --arg effort "${REASONING_EFFORT:-max}" \
+  '{benchmark_revision:$revision,model:$model,model_base_url:$base,
+    model_api_key:$api_key,provider:"anthropic",harbor_agent:"claude-code",
+    force_proxy:"false",reasoning_effort:$effort,max_iterations:200,
+    max_tokens:18000,request_timeout:3600,runtime_timeout_sec:30000,
+    claude_code_version:"2.1.220"}')"
+
+stamp="$(date -u +%Y%m%d-%H%M%S)"
+suite="skilllearnbench-opus5-${REASONING_EFFORT:-max}-selfgen-${MODE}-${stamp}"
+command=(ap --cluster "${AP_CLUSTER}" job create "${AP_TEMPLATE}"
+  --agenthub-ref "${AP_AGENTHUB_REF}"
+  --params-list "${params_file}" --params "${common}"
+  --suite-name "${suite}" --concurrency "${CONCURRENCY:-100}"
+  --priority medium --idempotency --format json)
+[[ "${MODE}" == "dry-run" ]] && command+=(--dry-run)
+"${command[@]}" > "${private_response}"
+
+artifact_dir="${ROOT_DIR}/ap/artifacts/submissions"
+mkdir -p "${artifact_dir}"
+redacted_response="${artifact_dir}/${suite}-response.redacted.json"
+jq 'walk(
+  if type == "object" then
+    with_entries(
+      if (.key | ascii_downcase | test("(^|_)(api_key|github_token|gh_token)$"))
+      then .value = "<redacted>" else . end
+    )
+  else . end
+)' "${private_response}" > "${redacted_response}"
+chmod 600 "${redacted_response}"
+
+python3 - "${private_response}" "${redacted_response}" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1]))
+submission = payload.get("submission", payload)
+safe = {
+    key: submission.get(key)
+    for key in ("group_id", "queue_id", "total", "submitted", "failed")
+    if key in submission
+}
+safe["redacted_response"] = sys.argv[2]
+print(json.dumps(safe, ensure_ascii=False, indent=2))
+PY

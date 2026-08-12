@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -97,6 +98,7 @@ def _audit_session_snapshot(
     parents: dict[str, str | None] = {}
     main_records: list[dict[str, Any]] = []
     last_prompt_leaves: list[tuple[int, str]] = []
+    compact_boundaries = 0
     for record in records:
         record_session = record.get("sessionId")
         if record_session is not None and record_session != session_id:
@@ -115,6 +117,28 @@ def _audit_session_snapshot(
         if record_uuid in uuids:
             raise RuntimeError(f"Duplicate Claude transcript uuid: {record_uuid}")
         parent = record.get("parentUuid")
+        if (
+            parent is None
+            and record.get("type") == "system"
+            and record.get("subtype") == "compact_boundary"
+        ):
+            logical_parent = record.get("logicalParentUuid")
+            metadata = record.get("compactMetadata")
+            preserved = metadata.get("preservedSegment") if isinstance(metadata, dict) else None
+            preserved_tail = preserved.get("tailUuid") if isinstance(preserved, dict) else None
+            if (
+                not isinstance(logical_parent, str)
+                or logical_parent not in uuids
+                or preserved_tail != logical_parent
+            ):
+                raise RuntimeError(
+                    f"Invalid Claude compact boundary link: {record_uuid} -> {logical_parent}"
+                )
+            # Claude Code starts a new physical parent tree after automatic
+            # compaction. logicalParentUuid is the continuity edge back to the
+            # pre-compaction transcript and is what resume semantics preserve.
+            parent = logical_parent
+            compact_boundaries += 1
         if parent is not None and parent not in uuids:
             raise RuntimeError(f"Broken Claude transcript parent link: {record_uuid} -> {parent}")
         uuids.add(record_uuid)
@@ -180,6 +204,7 @@ def _audit_session_snapshot(
         "prompt_verified": True,
         "tool_links_verified": True,
         "tool_calls": len(calls),
+        "compact_boundaries": compact_boundaries,
     }
 
 
@@ -189,29 +214,53 @@ def _export_and_audit_session(
 ) -> dict[str, Any]:
     if not _SESSION_ID_RE.fullmatch(session_id):
         raise RuntimeError(f"Unsafe Claude session id: {session_id!r}")
-    find_result = subprocess.run(
-        [
-            "docker", "exec", container, "sh", "-c",
-            'root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; '
-            'test -d "$root/projects" && find "$root/projects" -type f -name "$1.jsonl" -print',
-            "sh", session_id,
-        ],
-        capture_output=True, text=True, check=True,
-    )
-    matches = [line.strip() for line in find_result.stdout.splitlines() if line.strip()]
-    if len(matches) != 1:
-        raise RuntimeError(
-            f"Expected one native Claude transcript for {session_id}; found {len(matches)}"
-        )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["docker", "cp", f"{container}:{matches[0]}", str(destination)],
-        capture_output=True, text=True, check=True,
-    )
-    return _audit_session_snapshot(
-        destination, session_id=session_id, expected_prompt=expected_prompt,
-        previous_path=previous_path,
-    )
+    last_error = "native transcript was not found"
+    for retry in range(12):
+        find_result = subprocess.run(
+            [
+                "docker", "exec", container, "sh", "-c",
+                'root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; '
+                'if test -d "$root/projects"; then '
+                'find "$root/projects" -type f -name "$1.jsonl" -print; fi',
+                "sh", session_id,
+            ],
+            capture_output=True, text=True, check=False,
+        )
+        matches = [line.strip() for line in find_result.stdout.splitlines() if line.strip()]
+        if len(matches) == 1:
+            temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                copy_result = subprocess.run(
+                    ["docker", "cp", f"{container}:{matches[0]}", str(temporary)],
+                    capture_output=True, text=True, check=False,
+                )
+                if copy_result.returncode != 0:
+                    last_error = f"docker cp failed: {copy_result.stderr.strip()[:300]}"
+                else:
+                    result = _audit_session_snapshot(
+                        temporary, session_id=session_id, expected_prompt=expected_prompt,
+                        previous_path=previous_path,
+                    )
+                    os.replace(temporary, destination)
+                    result["path"] = str(destination)
+                    result["export_retries"] = retry
+                    return result
+            except RuntimeError as exc:
+                # Claude Code can still be flushing a large JSONL record after
+                # its CLI process exits. Retry a fresh atomic copy; never accept
+                # or repair a malformed snapshot in place.
+                last_error = str(exc)
+            finally:
+                temporary.unlink(missing_ok=True)
+        else:
+            last_error = (
+                f"Expected one native Claude transcript for {session_id}; "
+                f"found {len(matches)} (find exit {find_result.returncode})"
+            )
+        if retry < 11:
+            time.sleep(1)
+    raise RuntimeError(f"Could not export a valid Claude transcript: {last_error}")
 
 
 def _allowed_tools(agent: dict[str, Any], task_path: Path) -> str:
@@ -226,6 +275,18 @@ def _allowed_tools(agent: dict[str, Any], task_path: Path) -> str:
         except Exception:
             pass
     return " ".join(tool for tool in tools if tool not in disallowed)
+
+
+def _required_task_env(task_path: Path) -> list[str]:
+    config = task_path / "task.toml"
+    if not config.is_file():
+        return []
+    import tomllib
+    with config.open("rb") as handle:
+        required = tomllib.load(handle).get("environment", {}).get("required_env", [])
+    if not isinstance(required, list) or any(not isinstance(name, str) for name in required):
+        raise RuntimeError(f"Malformed required_env in {config}")
+    return required
 
 
 def _copy_text(container: str, destination: str, text: str) -> None:
@@ -447,8 +508,16 @@ def _heldout_eval(
             check=True, capture_output=True, text=True, timeout=1800,
         )
         env_args: list[str] = []
-        for name in list(agent.get("env", [])) + list(agent.get("passthrough_env", [])):
+        required_env = _required_task_env(heldout_path)
+        env_names = (
+            list(agent.get("env", []))
+            + list(agent.get("passthrough_env", []))
+            + required_env
+        )
+        for name in dict.fromkeys(env_names):
             value = os.environ.get(name)
+            if not value and name in required_env:
+                raise RuntimeError(f"Held-out {heldout_path.name} requires ${name}")
             if value:
                 env_args.extend(["-e", f"{name}={value}"])
         subprocess.run(
@@ -497,14 +566,32 @@ def _evaluate_heldouts(
     *, task_path: Path, trial_path: Path, frozen: Path,
     agent: dict[str, Any], model_name: str, max_steps: int,
 ) -> list[dict[str, Any]]:
+    heldout_numbers = _family_heldout_numbers(task_path)
     return [
         _heldout_eval(
             task_path=task_path, trial_path=trial_path, frozen=frozen,
             instance_number=instance_number, agent=agent,
             model_name=model_name, max_steps=max_steps,
         )
-        for instance_number in range(2, 6)
+        for instance_number in heldout_numbers
     ]
+
+
+def _family_heldout_numbers(task_path: Path) -> list[int]:
+    family = task_path.parent.name
+    if task_path.name != f"{family}-1":
+        raise RuntimeError(f"Learning instance must be {family}-1, got {task_path.name}")
+    numbered: list[int] = []
+    for sibling in task_path.parent.iterdir():
+        match = re.fullmatch(rf"{re.escape(family)}-(\d+)", sibling.name)
+        if match and sibling.is_dir() and (sibling / "instruction.md").is_file():
+            numbered.append(int(match.group(1)))
+    if numbered.count(1) != 1 or len(numbered) != len(set(numbered)):
+        raise RuntimeError(f"Malformed or duplicate family instance set for {family}: {numbered}")
+    heldout_numbers = sorted(number for number in numbered if number != 1)
+    if not heldout_numbers:
+        raise RuntimeError(f"Family {family} has no held-out instances")
+    return heldout_numbers
 
 
 def run(
@@ -593,15 +680,15 @@ def run(
     if frozen_after != frozen_before:
         raise RuntimeError("Frozen skill library mutated during held-out evaluation")
     heldout_session_ids = [item["session_id"] for item in heldouts]
-    if len(set(heldout_session_ids)) != 4 or session_id in heldout_session_ids:
-        raise RuntimeError("Held-out evaluations did not use four distinct fresh sessions")
+    if len(set(heldout_session_ids)) != len(heldouts) or session_id in heldout_session_ids:
+        raise RuntimeError("Held-out evaluations did not use distinct fresh sessions")
     family = task_path.parent.name
-    expected_heldouts = [f"{family}-{number}" for number in range(2, 6)]
+    expected_heldouts = [item["instance_id"] for item in heldouts]
     if [item["instance_id"] for item in heldouts] != expected_heldouts:
         raise RuntimeError("Held-out instance coverage or order mismatch")
     heldout_pass_count = sum(item["verifier_passed"] is True for item in heldouts)
     audit = {
-        "protocol": "in-session-3try-skill-creator-family-v1",
+        "protocol": "in-session-3try-skill-creator-family-v2",
         "scoreable": False,
         "family_id": family,
         "session_id": session_id,
@@ -633,8 +720,8 @@ def run(
         "heldouts": heldouts,
         "heldout_expected": expected_heldouts,
         "heldout_pass_count": heldout_pass_count,
-        "heldout_total": 4,
-        "heldout_score": heldout_pass_count / 4,
+        "heldout_total": len(heldouts),
+        "heldout_score": heldout_pass_count / len(heldouts),
     }
     (trial_path / "selfgen_audit.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
     # The plugin contract's rounds field is the scientific solve-attempt count.
