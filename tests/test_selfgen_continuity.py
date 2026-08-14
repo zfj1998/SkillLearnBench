@@ -179,6 +179,16 @@ def test_skill_candidate_classification_keeps_invalid_output_as_model_behavior()
     assert valid["skills"] == ["/root/skills/good/SKILL.md"]
 
 
+def test_scoreable_mode_is_explicit_and_fail_closed(monkeypatch):
+    monkeypatch.delenv("SELFGEN_SCOREABLE", raising=False)
+    assert METHOD._scoreable_mode() is False
+    monkeypatch.setenv("SELFGEN_SCOREABLE", "true")
+    assert METHOD._scoreable_mode() is True
+    monkeypatch.setenv("SELFGEN_SCOREABLE", "yes")
+    with pytest.raises(RuntimeError, match="must be true or false"):
+        METHOD._scoreable_mode()
+
+
 def test_required_task_env_is_read_from_task_toml(tmp_path):
     task = tmp_path / "family-2"
     task.mkdir()

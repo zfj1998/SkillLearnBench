@@ -24,6 +24,13 @@ from typing import Any
 _SESSION_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 
 
+def _scoreable_mode() -> bool:
+    value = os.environ.get("SELFGEN_SCOREABLE", "false").strip().lower()
+    if value not in {"true", "false"}:
+        raise RuntimeError("SELFGEN_SCOREABLE must be true or false")
+    return value == "true"
+
+
 def _jsonl_records(path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
@@ -689,7 +696,7 @@ def run(
     heldout_pass_count = sum(item["verifier_passed"] is True for item in heldouts)
     audit = {
         "protocol": "in-session-3try-skill-creator-family-v2",
-        "scoreable": False,
+        "scoreable": _scoreable_mode(),
         "family_id": family,
         "session_id": session_id,
         "attempts_used": len(list(audit_dir.glob("attempt-*"))),

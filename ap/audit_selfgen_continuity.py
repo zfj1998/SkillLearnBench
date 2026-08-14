@@ -22,6 +22,9 @@ SPEC.loader.exec_module(METHOD)
 
 def audit_trial(trial: Path) -> dict:
     source = json.loads((trial / "selfgen_audit.json").read_text(encoding="utf-8"))
+    scoreable = source.get("scoreable")
+    if type(scoreable) is not bool:
+        raise RuntimeError("Runtime scoreable marker is missing or malformed")
     session_id = source["session_id"]
     attempts = int(source["attempts_used"])
     snapshots = []
@@ -44,7 +47,7 @@ def audit_trial(trial: Path) -> dict:
 
     result = {
         "protocol": source["protocol"],
-        "scoreable": False,
+        "scoreable": scoreable,
         "session_id": session_id,
         "attempts_used": attempts,
         "session_snapshot_count": len(snapshots),

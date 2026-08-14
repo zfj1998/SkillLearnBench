@@ -78,11 +78,12 @@ common="$(jq -cn \
   --arg base "${MODEL_BASE_URL:-https://routify-pub.alibaba-inc.com/protocol/anthropic}" \
   --arg api_key "${MODEL_API_KEY}" \
   --arg effort "${REASONING_EFFORT:-max}" \
+  --arg scoreable "$([[ "${MODE}" == "full" ]] && printf true || printf false)" \
   '{benchmark_revision:$revision,model:$model,model_base_url:$base,
     model_api_key:$api_key,provider:"anthropic",harbor_agent:"claude-code",
     force_proxy:"false",reasoning_effort:$effort,max_iterations:200,
     max_tokens:18000,request_timeout:3600,runtime_timeout_sec:30000,
-    claude_code_version:"2.1.220"}')"
+    claude_code_version:"2.1.220",scoreable:$scoreable}')"
 
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 suite="skilllearnbench-opus5-${REASONING_EFFORT:-max}-selfgen-${MODE}-${stamp}"
@@ -91,6 +92,7 @@ command=(ap --cluster "${AP_CLUSTER}" job create "${AP_TEMPLATE}"
   --params-list "${params_file}" --params "${common}"
   --suite-name "${suite}" --concurrency "${CONCURRENCY:-100}"
   --priority medium --idempotency --format json)
+[[ "${MODE}" == "full" ]] && command+=(--enable-post-process)
 [[ "${MODE}" == "dry-run" ]] && command+=(--dry-run)
 "${command[@]}" > "${private_response}"
 
