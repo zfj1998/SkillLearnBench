@@ -43,6 +43,11 @@ case "${DRY_RUN}" in
   true|false) ;;
   *) echo "DRY_RUN must be true or false" >&2; exit 2 ;;
 esac
+SCOREABLE="${SCOREABLE:-$([[ "${MODE}" == "full" ]] && printf true || printf false)}"
+case "${SCOREABLE}" in
+  true|false) ;;
+  *) echo "SCOREABLE must be true or false" >&2; exit 2 ;;
+esac
 
 mapfile -t ALL_FAMILIES < <(
   find "${ROOT_DIR}/tasks" -mindepth 2 -maxdepth 2 -type d -name '*-1' \
@@ -83,7 +88,7 @@ common="$(jq -cn \
   --arg base "${MODEL_BASE_URL:-https://routify-pub.alibaba-inc.com/protocol/anthropic}" \
   --arg api_key "${MODEL_API_KEY}" \
   --arg effort "${REASONING_EFFORT:-max}" \
-  --arg scoreable "$([[ "${MODE}" == "full" ]] && printf true || printf false)" \
+  --arg scoreable "${SCOREABLE}" \
   '{benchmark_revision:$revision,model:$model,model_base_url:$base,
     model_api_key:$api_key,provider:"anthropic",harbor_agent:"claude-code",
     force_proxy:"false",reasoning_effort:$effort,max_iterations:200,
