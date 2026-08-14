@@ -6,6 +6,7 @@ WORKSPACE_DIR="$(cd "${ROOT_DIR}/.." && pwd)"
 ENV_FILE="${ENV_FILE:-${WORKSPACE_DIR}/.env}"
 MODE="${1:-dry-run}"
 FAMILY="${2:-chinese-poem-generator}"
+DRY_RUN="${DRY_RUN:-false}"
 
 if [[ -f "${ENV_FILE}" ]]; then
   set +x
@@ -37,6 +38,10 @@ esac
 case "${MODE}" in
   dry-run|smoke|full) ;;
   *) echo "usage: $0 {dry-run|smoke|full} [family]" >&2; exit 2 ;;
+esac
+case "${DRY_RUN}" in
+  true|false) ;;
+  *) echo "DRY_RUN must be true or false" >&2; exit 2 ;;
 esac
 
 mapfile -t ALL_FAMILIES < <(
@@ -93,7 +98,7 @@ command=(ap --cluster "${AP_CLUSTER}" job create "${AP_TEMPLATE}"
   --suite-name "${suite}" --concurrency "${CONCURRENCY:-100}"
   --priority medium --idempotency --format json)
 [[ "${MODE}" == "full" ]] && command+=(--enable-post-process)
-[[ "${MODE}" == "dry-run" ]] && command+=(--dry-run)
+[[ "${MODE}" == "dry-run" || "${DRY_RUN}" == "true" ]] && command+=(--dry-run)
 "${command[@]}" > "${private_response}"
 
 artifact_dir="${ROOT_DIR}/ap/artifacts/submissions"
