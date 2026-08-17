@@ -79,6 +79,24 @@ def test_accepts_last_prompt_marker_before_referenced_leaf(tmp_path):
     assert result["leaf_uuid"] == "a1"
 
 
+def test_jsonl_parser_preserves_unicode_line_separators_inside_strings(tmp_path):
+    path = tmp_path / "session.jsonl"
+    rows = [
+        _record("user", "u1", None, text="left\u2028right"),
+        _record("assistant", "a1", "u1", text="up\u2029down"),
+    ]
+    path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    parsed = METHOD._jsonl_records(path)
+
+    assert len(parsed) == 2
+    assert parsed[0]["message"]["content"] == "left\u2028right"
+    assert parsed[1]["message"]["content"] == "up\u2029down"
+
+
 def test_rejects_last_prompt_leaf_missing_from_complete_snapshot(tmp_path):
     path = tmp_path / "session.jsonl"
     _write(path, [

@@ -68,7 +68,11 @@ def _install_binary_safe_cat(container: str) -> None:
 
 def _jsonl_records(path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    # JSON permits literal Unicode line/paragraph separators inside strings.
+    # str.splitlines() treats U+2028/U+2029 as record boundaries even though
+    # JSONL is delimited only by physical LF bytes, corrupting valid Claude
+    # transcript records that contain those characters.
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
         if not line.strip():
             continue
         try:
