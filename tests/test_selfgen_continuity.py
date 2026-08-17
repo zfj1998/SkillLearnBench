@@ -1,6 +1,8 @@
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -192,6 +194,31 @@ def test_scoreable_mode_is_explicit_and_fail_closed(monkeypatch):
 def test_selfgen_timeouts_cover_long_opus_turns():
     assert METHOD._CLAUDE_TURN_TIMEOUT_SECONDS == 7200
     assert METHOD._HELDOUT_CONTAINER_KEEPALIVE_SECONDS > METHOD._CLAUDE_TURN_TIMEOUT_SECONDS
+
+
+def test_binary_safe_cat_preserves_text_and_redacts_binary(tmp_path):
+    wrapper = tmp_path / "cat"
+    wrapper.write_text(METHOD._BINARY_SAFE_CAT)
+    wrapper.chmod(0o755)
+    text_file = tmp_path / "text.txt"
+    text_file.write_text("hello\nworld\n")
+    binary_file = tmp_path / "launcher"
+    binary = b"#!/bin/sh\n" + bytes(range(256))
+    binary_file.write_bytes(binary)
+
+    text_result = subprocess.run(
+        [str(wrapper), str(text_file)], check=True, capture_output=True, text=True
+    )
+    binary_result = subprocess.run(
+        [str(wrapper), str(binary_file)], check=True, capture_output=True, text=True
+    )
+
+    assert text_result.stdout == "hello\nworld\n"
+    assert binary_result.stdout == (
+        f"[binary output omitted by harness: {len(binary)} bytes, "
+        f"sha256={hashlib.sha256(binary).hexdigest()}]\n"
+    )
+    assert "\x00" not in binary_result.stdout
 
 
 def test_required_task_env_is_read_from_task_toml(tmp_path):

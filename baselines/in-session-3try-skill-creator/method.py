@@ -24,6 +24,24 @@ from typing import Any
 _SESSION_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 _CLAUDE_TURN_TIMEOUT_SECONDS = 7200
 _HELDOUT_CONTAINER_KEEPALIVE_SECONDS = 10800
+_BINARY_SAFE_CAT = r'''#!/bin/sh
+set -u
+if [ "$#" -eq 0 ]; then
+  exec /usr/bin/cat
+fi
+tmp="$(mktemp /tmp/selfgen-cat.XXXXXX)" || exit 1
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+/usr/bin/cat "$@" >"$tmp"
+rc=$?
+if [ ! -s "$tmp" ] || LC_ALL=C grep -Iq . "$tmp"; then
+  /usr/bin/cat "$tmp"
+else
+  bytes="$(wc -c <"$tmp" | tr -d '[:space:]')"
+  digest="$(sha256sum "$tmp" | awk '{print $1}')"
+  printf '[binary output omitted by harness: %s bytes, sha256=%s]\n' "$bytes" "$digest"
+fi
+exit "$rc"
+'''
 
 
 def _scoreable_mode() -> bool:
@@ -31,6 +49,21 @@ def _scoreable_mode() -> bool:
     if value not in {"true", "false"}:
         raise RuntimeError("SELFGEN_SCOREABLE must be true or false")
     return value == "true"
+
+
+def _install_binary_safe_cat(container: str) -> None:
+    """Prevent raw binary Bash output from corrupting Claude JSONL transcripts."""
+    subprocess.run(
+        [
+            "docker", "exec", "-i", container, "sh", "-c",
+            "tmp=$(mktemp /usr/local/bin/cat.XXXXXX) && "
+            "/usr/bin/cat >\"$tmp\" && chmod 0755 \"$tmp\" && mv \"$tmp\" /usr/local/bin/cat",
+        ],
+        input=_BINARY_SAFE_CAT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
 
 
 def _jsonl_records(path: Path) -> list[dict[str, Any]]:
@@ -547,6 +580,7 @@ def _heldout_eval(
             ["docker", "exec", container, "sh", "-c", agent["install"]],
             check=True, capture_output=True, text=True, timeout=900,
         )
+        _install_binary_safe_cat(container)
         heldout_session = str(uuid.uuid4())
         instruction = (heldout_path / "instruction.md").read_text(encoding="utf-8").strip()
         rc, _out, err, steps = _claude_turn(
@@ -612,6 +646,7 @@ def run(
     model_name: str, instruction: str, task_workdir: str, max_rounds: int,
     max_steps: int,
 ) -> tuple[bool, int, str, str, int]:
+    _install_binary_safe_cat(container_name)
     session_id = str(uuid.uuid4())
     audit_dir = trial_path / "same-session-attempts"
     audit_dir.mkdir(parents=True, exist_ok=True)
