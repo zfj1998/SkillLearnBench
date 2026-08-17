@@ -66,6 +66,30 @@ def test_accepts_strict_prefix_parent_and_tool_links(tmp_path):
     assert result["appended_records"] == 3
 
 
+def test_accepts_resume_handshake_between_previous_leaf_and_phase_prompt(tmp_path):
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    records = [
+        _record("user", "u1", None, text="solve"),
+        _record("assistant", "a1", "u1", text="API Error: Stream idle timeout"),
+        _leaf("a1"),
+    ]
+    _write(first, records)
+    _write(second, records + [
+        _record("user", "resume", "a1", text="Continue from where you left off."),
+        _record("assistant", "noop", "resume", text="No response requested."),
+        _record("user", "u2", "noop", text="reflect"),
+        _record("assistant", "a2", "u2", text="captured"),
+        _leaf("a2"),
+    ])
+    result = METHOD._audit_session_snapshot(
+        second, session_id=SESSION, expected_prompt="reflect", previous_path=first
+    )
+    assert result["prefix_verified"] is True
+    assert result["parent_links_verified"] is True
+    assert result["prompt_verified"] is True
+
+
 def test_accepts_last_prompt_marker_before_referenced_leaf(tmp_path):
     path = tmp_path / "session.jsonl"
     _write(path, [

@@ -221,7 +221,15 @@ def _audit_session_snapshot(
             record.get("leafUuid") for record in previous_records
             if record.get("type") == "last-prompt"
         ]
-        if not previous_leaves or prompt_records[0].get("parentUuid") != previous_leaves[-1]:
+        previous_leaf = previous_leaves[-1] if previous_leaves else None
+        cursor = prompt_records[0].get("parentUuid")
+        prompt_ancestors: set[str] = set()
+        while cursor is not None:
+            if cursor in prompt_ancestors:
+                raise RuntimeError(f"Cycle in Claude transcript parent graph at {cursor}")
+            prompt_ancestors.add(cursor)
+            cursor = parents[cursor]
+        if previous_leaf is None or previous_leaf not in prompt_ancestors:
             raise RuntimeError("Claude phase prompt does not continue the previous terminal leaf")
 
     leaf_uuid = last_prompt_leaves[-1][1]
