@@ -66,6 +66,29 @@ def test_accepts_strict_prefix_parent_and_tool_links(tmp_path):
     assert result["appended_records"] == 3
 
 
+def test_accepts_last_prompt_marker_before_referenced_leaf(tmp_path):
+    path = tmp_path / "session.jsonl"
+    _write(path, [
+        _record("user", "u1", None, text="solve"),
+        _leaf("a1"),
+        _record("assistant", "a1", "u1", text="done"),
+    ])
+    result = METHOD._audit_session_snapshot(
+        path, session_id=SESSION, expected_prompt="solve"
+    )
+    assert result["leaf_uuid"] == "a1"
+
+
+def test_rejects_last_prompt_leaf_missing_from_complete_snapshot(tmp_path):
+    path = tmp_path / "session.jsonl"
+    _write(path, [
+        _record("user", "u1", None, text="solve"),
+        _leaf("missing"),
+    ])
+    with pytest.raises(RuntimeError, match="Invalid Claude transcript last-prompt leaf"):
+        METHOD._audit_session_snapshot(path, session_id=SESSION, expected_prompt="solve")
+
+
 def test_rejects_non_prefix_snapshot(tmp_path):
     first = tmp_path / "first.jsonl"
     second = tmp_path / "second.jsonl"

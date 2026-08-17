@@ -149,7 +149,7 @@ def _audit_session_snapshot(
             )
         if record.get("type") == "last-prompt":
             leaf_uuid = record.get("leafUuid")
-            if not isinstance(leaf_uuid, str) or leaf_uuid not in uuids:
+            if not isinstance(leaf_uuid, str) or not leaf_uuid:
                 raise RuntimeError(f"Invalid Claude transcript last-prompt leaf: {leaf_uuid}")
             last_prompt_leaves.append((len(main_records), leaf_uuid))
 
@@ -194,6 +194,9 @@ def _audit_session_snapshot(
             main_records.append(record)
     if not main_records or not last_prompt_leaves:
         raise RuntimeError("Claude transcript lacks main messages or a terminal leaf marker")
+    missing_leaves = sorted({leaf for _, leaf in last_prompt_leaves if leaf not in uuids})
+    if missing_leaves:
+        raise RuntimeError(f"Invalid Claude transcript last-prompt leaf: {missing_leaves[0]}")
 
     previous_count = len(previous_records)
     appended = records[previous_count:]
@@ -293,6 +296,9 @@ def _export_and_audit_session(
                 # its CLI process exits. Retry a fresh atomic copy; never accept
                 # or repair a malformed snapshot in place.
                 last_error = str(exc)
+                if retry == 11 and temporary.exists():
+                    invalid = destination.with_name(f"{destination.stem}.invalid.jsonl")
+                    os.replace(temporary, invalid)
             finally:
                 temporary.unlink(missing_ok=True)
         else:
