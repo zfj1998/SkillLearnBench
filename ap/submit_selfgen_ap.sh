@@ -33,6 +33,7 @@ case "${MODEL}" in
     MODEL_BASE_URL="${MODEL_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
     MODEL_API_KEY="${MODEL_API_KEY:-${DASHSCOPE_API_KEY_kimi:-}}"
     REASONING_EFFORT="${REASONING_EFFORT:-xhigh}"
+    MODEL_MAX_TOKENS_DEFAULT=18000
     ;;
   claude-opus-5)
     PROVIDER="${PROVIDER:-anthropic}"
@@ -40,6 +41,7 @@ case "${MODEL}" in
     MODEL_BASE_URL="${MODEL_BASE_URL:-https://routify-pub.alibaba-inc.com/protocol/anthropic}"
     MODEL_API_KEY="${MODEL_API_KEY:-${ROUTIFY_MY_KEY_0727:-${ROUTIFY_KEY:-}}}"
     REASONING_EFFORT="${REASONING_EFFORT:-max}"
+    MODEL_MAX_TOKENS_DEFAULT=128000
     ;;
   *)
     : "${PROVIDER:?PROVIDER is required for model ${MODEL}}"
@@ -47,9 +49,15 @@ case "${MODEL}" in
     : "${MODEL_BASE_URL:?MODEL_BASE_URL is required for model ${MODEL}}"
     : "${MODEL_API_KEY:?MODEL_API_KEY is required for model ${MODEL}}"
     : "${REASONING_EFFORT:?REASONING_EFFORT is required for model ${MODEL}}"
+    : "${MAX_TOKENS:?MAX_TOKENS is required for model ${MODEL}}"
     ;;
 esac
 : "${MODEL_API_KEY:?MODEL_API_KEY or the provider-specific protected key is required}"
+MAX_TOKENS="${MAX_TOKENS:-${MODEL_MAX_TOKENS_DEFAULT:-}}"
+[[ "${MAX_TOKENS}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "MAX_TOKENS must be a positive integer" >&2
+  exit 2
+}
 GH_TOKEN="${GH_TOKEN:-}"
 if [[ -z "${GH_TOKEN}" ]] && command -v gh >/dev/null; then
   GH_TOKEN="$(gh auth token 2>/dev/null || true)"
@@ -139,12 +147,13 @@ common="$(jq -cn \
   --arg force_proxy "${FORCE_PROXY}" \
   --arg effort "${REASONING_EFFORT}" \
   --arg scoreable "${SCOREABLE}" \
+  --argjson max_tokens "${MAX_TOKENS}" \
   --argjson request_timeout "${REQUEST_TIMEOUT_SECONDS}" \
   --argjson runtime_timeout_sec "${RUNTIME_TIMEOUT_SECONDS}" \
   '{benchmark_revision:$revision,model:$model,model_base_url:$base,
     model_api_key:$api_key,provider:$provider,harbor_agent:"claude-code",
     force_proxy:$force_proxy,reasoning_effort:$effort,max_iterations:200,
-    max_tokens:18000,request_timeout:$request_timeout,runtime_timeout_sec:$runtime_timeout_sec,
+    max_tokens:$max_tokens,request_timeout:$request_timeout,runtime_timeout_sec:$runtime_timeout_sec,
     claude_code_version:"2.1.220",scoreable:$scoreable}')"
 
 stamp="$(date -u +%Y%m%d-%H%M%S)"
