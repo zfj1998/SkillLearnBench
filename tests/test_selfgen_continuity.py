@@ -189,6 +189,11 @@ def test_scoreable_mode_is_explicit_and_fail_closed(monkeypatch):
         METHOD._scoreable_mode()
 
 
+def test_selfgen_timeouts_cover_long_opus_turns():
+    assert METHOD._CLAUDE_TURN_TIMEOUT_SECONDS == 7200
+    assert METHOD._HELDOUT_CONTAINER_KEEPALIVE_SECONDS > METHOD._CLAUDE_TURN_TIMEOUT_SECONDS
+
+
 def test_required_task_env_is_read_from_task_toml(tmp_path):
     task = tmp_path / "family-2"
     task.mkdir()

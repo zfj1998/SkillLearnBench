@@ -22,6 +22,8 @@ from typing import Any
 
 
 _SESSION_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+_CLAUDE_TURN_TIMEOUT_SECONDS = 7200
+_HELDOUT_CONTAINER_KEEPALIVE_SECONDS = 10800
 
 
 def _scoreable_mode() -> bool:
@@ -330,7 +332,7 @@ def _claude_turn(
         ["docker", "exec", container, "sh", "-c", command],
         capture_output=True,
         text=True,
-        timeout=3600,
+        timeout=_CLAUDE_TURN_TIMEOUT_SECONDS,
     )
     Path(output_path).write_text(result.stdout, encoding="utf-8")
     steps = 0
@@ -528,7 +530,11 @@ def _heldout_eval(
             if value:
                 env_args.extend(["-e", f"{name}={value}"])
         subprocess.run(
-            ["docker", "run", "-d", "--name", container, "-v", f"{heldout_log}:/logs", *env_args, image, "sleep", "3600"],
+            [
+                "docker", "run", "-d", "--name", container,
+                "-v", f"{heldout_log}:/logs", *env_args, image,
+                "sleep", str(_HELDOUT_CONTAINER_KEEPALIVE_SECONDS),
+            ],
             check=True, capture_output=True, text=True,
         )
         runtime_deps = agent.get("runtime_deps")
