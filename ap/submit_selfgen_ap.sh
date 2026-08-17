@@ -24,17 +24,65 @@ AP_TEMPLATE="${AP_TEMPLATE:-skilllearnbench-selfgen-smoke}"
 export AP_API_KEY="${AP_API_KEY:-${AP_KEY:-}}"
 : "${AP_API_KEY:?AP_API_KEY or AP_KEY is required}"
 unset AP_HEADERS || true
-MODEL_API_KEY="${MODEL_API_KEY:-${ROUTIFY_MY_KEY_0727:-${ROUTIFY_KEY:-}}}"
-: "${MODEL_API_KEY:?MODEL_API_KEY or a Routify key is required}"
+
+MODEL="${MODEL:-claude-opus-5}"
+case "${MODEL}" in
+  qwen3.8-max)
+    PROVIDER="${PROVIDER:-openai}"
+    FORCE_PROXY="${FORCE_PROXY:-true}"
+    MODEL_BASE_URL="${MODEL_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+    MODEL_API_KEY="${MODEL_API_KEY:-${DASHSCOPE_API_KEY_kimi:-}}"
+    REASONING_EFFORT="${REASONING_EFFORT:-xhigh}"
+    ;;
+  claude-opus-5)
+    PROVIDER="${PROVIDER:-anthropic}"
+    FORCE_PROXY="${FORCE_PROXY:-false}"
+    MODEL_BASE_URL="${MODEL_BASE_URL:-https://routify-pub.alibaba-inc.com/protocol/anthropic}"
+    MODEL_API_KEY="${MODEL_API_KEY:-${ROUTIFY_MY_KEY_0727:-${ROUTIFY_KEY:-}}}"
+    REASONING_EFFORT="${REASONING_EFFORT:-max}"
+    ;;
+  *)
+    : "${PROVIDER:?PROVIDER is required for model ${MODEL}}"
+    : "${FORCE_PROXY:?FORCE_PROXY is required for model ${MODEL}}"
+    : "${MODEL_BASE_URL:?MODEL_BASE_URL is required for model ${MODEL}}"
+    : "${MODEL_API_KEY:?MODEL_API_KEY is required for model ${MODEL}}"
+    : "${REASONING_EFFORT:?REASONING_EFFORT is required for model ${MODEL}}"
+    ;;
+esac
+: "${MODEL_API_KEY:?MODEL_API_KEY or the provider-specific protected key is required}"
 GH_TOKEN="${GH_TOKEN:-}"
 if [[ -z "${GH_TOKEN}" ]] && command -v gh >/dev/null; then
   GH_TOKEN="$(gh auth token 2>/dev/null || true)"
 fi
 
-case "${REASONING_EFFORT:-max}" in
+case "${REASONING_EFFORT}" in
   xhigh|max) ;;
   *) echo "REASONING_EFFORT must be xhigh or max" >&2; exit 2 ;;
 esac
+case "${FORCE_PROXY}:${PROVIDER}" in
+  true:openai|false:anthropic) ;;
+  *) echo "unsupported FORCE_PROXY/PROVIDER combination" >&2; exit 2 ;;
+esac
+if [[ "${MODEL}" == "qwen3.8-max" && "${REASONING_EFFORT}" != "xhigh" ]]; then
+  echo "qwen3.8-max selfgen must use xhigh; max was not stable on this endpoint" >&2
+  exit 2
+fi
+if [[ "${MODEL}" == "claude-opus-5" && "${REASONING_EFFORT}" != "max" ]]; then
+  echo "claude-opus-5 selfgen must use max for the matched comparison" >&2
+  exit 2
+fi
+REQUEST_TIMEOUT_SECONDS="${REQUEST_TIMEOUT_SECONDS:-3600}"
+RUNTIME_TIMEOUT_SECONDS="${RUNTIME_TIMEOUT_SECONDS:-72000}"
+for timeout_value in "${REQUEST_TIMEOUT_SECONDS}" "${RUNTIME_TIMEOUT_SECONDS}"; do
+  [[ "${timeout_value}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "timeout values must be positive integer seconds" >&2
+    exit 2
+  }
+done
+(( REQUEST_TIMEOUT_SECONDS < RUNTIME_TIMEOUT_SECONDS )) || {
+  echo "REQUEST_TIMEOUT_SECONDS must be less than RUNTIME_TIMEOUT_SECONDS" >&2
+  exit 2
+}
 case "${MODE}" in
   dry-run|smoke|full) ;;
   *) echo "usage: $0 {dry-run|smoke|full} [family]" >&2; exit 2 ;;
@@ -84,23 +132,35 @@ jq -n --argjson families "$(printf '%s\n' "${FAMILIES[@]}" | jq -Rsc 'split("\n"
 
 common="$(jq -cn \
   --arg revision "${BENCHMARK_REVISION}" \
-  --arg model "${MODEL:-claude-opus-5}" \
-  --arg base "${MODEL_BASE_URL:-https://routify-pub.alibaba-inc.com/protocol/anthropic}" \
+  --arg model "${MODEL}" \
+  --arg base "${MODEL_BASE_URL}" \
   --arg api_key "${MODEL_API_KEY}" \
-  --arg effort "${REASONING_EFFORT:-max}" \
+  --arg provider "${PROVIDER}" \
+  --arg force_proxy "${FORCE_PROXY}" \
+  --arg effort "${REASONING_EFFORT}" \
   --arg scoreable "${SCOREABLE}" \
+  --argjson request_timeout "${REQUEST_TIMEOUT_SECONDS}" \
+  --argjson runtime_timeout_sec "${RUNTIME_TIMEOUT_SECONDS}" \
   '{benchmark_revision:$revision,model:$model,model_base_url:$base,
-    model_api_key:$api_key,provider:"anthropic",harbor_agent:"claude-code",
-    force_proxy:"false",reasoning_effort:$effort,max_iterations:200,
-    max_tokens:18000,request_timeout:3600,runtime_timeout_sec:30000,
+    model_api_key:$api_key,provider:$provider,harbor_agent:"claude-code",
+    force_proxy:$force_proxy,reasoning_effort:$effort,max_iterations:200,
+    max_tokens:18000,request_timeout:$request_timeout,runtime_timeout_sec:$runtime_timeout_sec,
     claude_code_version:"2.1.220",scoreable:$scoreable}')"
 
 stamp="$(date -u +%Y%m%d-%H%M%S)"
-suite="skilllearnbench-opus5-${REASONING_EFFORT:-max}-selfgen-${MODE}-${stamp}"
+model_slug="$(printf '%s' "${MODEL}" | tr -cs '[:alnum:]' '-')"
+suite="skilllearnbench-${model_slug}-${REASONING_EFFORT}-selfgen-${MODE}-${stamp}"
+if [[ -z "${CONCURRENCY:-}" ]]; then
+  [[ "${MODE}" == "full" ]] && CONCURRENCY=20 || CONCURRENCY=1
+fi
+[[ "${CONCURRENCY}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "CONCURRENCY must be a positive integer" >&2
+  exit 2
+}
 command=(ap --cluster "${AP_CLUSTER}" job create "${AP_TEMPLATE}"
   --agenthub-ref "${AP_AGENTHUB_REF}"
   --params-list "${params_file}" --params "${common}"
-  --suite-name "${suite}" --concurrency "${CONCURRENCY:-100}"
+  --suite-name "${suite}" --concurrency "${CONCURRENCY}"
   --priority medium --idempotency --format json)
 [[ "${MODE}" == "full" ]] && command+=(--enable-post-process)
 [[ "${MODE}" == "dry-run" || "${DRY_RUN}" == "true" ]] && command+=(--dry-run)
@@ -112,7 +172,7 @@ redacted_response="${artifact_dir}/${suite}-response.redacted.json"
 jq 'walk(
   if type == "object" then
     with_entries(
-      if (.key | ascii_downcase | test("(^|_)(api_key|github_token|gh_token)$"))
+      if (.key | ascii_downcase | test("(^|[-_])(api[-_]?key|authorization|github[-_]?token|gh[-_]?token)$"))
       then .value = "<redacted>" else . end
     )
   else . end

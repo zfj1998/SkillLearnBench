@@ -757,11 +757,11 @@ def run_task(task_id: str, *, agent_id: str = "codex", model: str | None = None,
         container_args.extend(["-v", f"{task_path / 'tests'}:/tests:ro"])
     # A self-generated family keeps one learning container alive across as many
     # as three solve attempts plus the terminal Skill Creator reflection.  One
-    # Opus 5/max attempt can legitimately exceed an hour, so its container must
-    # outlive the complete AP family runtime rather than the historical
-    # single-task one-hour keepalive.
+    # Opus 5/max attempt can legitimately exceed an hour. Keep the learning
+    # container above the 4 x 7200-second solve/reflection turn budget with
+    # setup/finalization margin; held-out containers have their own cap.
     container_keepalive = (
-        "32400" if method == "in-session-3try-skill-creator" else "3600"
+        "36000" if method == "in-session-3try-skill-creator" else "3600"
     )
     container_args.extend([*env_args, image_tag, "sleep", container_keepalive])
     r = subprocess.run(
