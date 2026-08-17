@@ -19,6 +19,33 @@ if SPEC is None or SPEC.loader is None:
 METHOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(METHOD)
 
+_HIDDEN_TESTS_PATH = re.compile(r"(?<![A-Za-z0-9_.-])/tests(?:/|\b)")
+
+
+def _hidden_tests_path_mentions(agent_jsonl: Path) -> int:
+    """Count model-authored references to the hidden verifier mount.
+
+    Inspect assistant events rather than the raw JSONL so a benchmark prompt
+    cannot indict itself. The left boundary also avoids treating ordinary
+    prose such as ``compilation/tests`` as an absolute ``/tests`` path.
+    """
+    mentions = 0
+    for line_number, line in enumerate(
+        agent_jsonl.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Malformed held-out agent JSONL at {agent_jsonl}:{line_number}"
+            ) from exc
+        if record.get("type") != "assistant":
+            continue
+        message = record.get("message")
+        authored = json.dumps(message, ensure_ascii=False) if isinstance(message, dict) else ""
+        mentions += len(_HIDDEN_TESTS_PATH.findall(authored))
+    return mentions
+
 
 def _validate_verifier_evidence(verifier: Path, heldout_task: Path) -> dict:
     """Validate the official evidence format actually emitted by this task.
@@ -162,10 +189,9 @@ def audit_trial(trial: Path) -> dict:
             verifier_evidence.append({"instance_id": item["instance_id"], **evidence})
             if evidence_passed:
                 pass_count += 1
-            agent_text = (trial / f"heldout-instance-{number}" / "agent.jsonl").read_text(
-                encoding="utf-8"
+            tests_path_mentions += _hidden_tests_path_mentions(
+                trial / f"heldout-instance-{number}" / "agent.jsonl"
             )
-            tests_path_mentions += agent_text.count("/tests")
         if tests_path_mentions:
             raise RuntimeError("Held-out agent trajectory mentions the hidden /tests path")
         score = pass_count / len(expected)

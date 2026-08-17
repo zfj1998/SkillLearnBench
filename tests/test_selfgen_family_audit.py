@@ -141,3 +141,24 @@ def test_verifier_evidence_requires_ctrf_when_task_declares_it(tmp_path):
 
     with pytest.raises(RuntimeError, match="CTRF evidence required"):
         AUDITOR._validate_verifier_evidence(verifier, task)
+
+
+def test_hidden_tests_path_scan_ignores_prose_and_user_prompt(tmp_path):
+    trajectory = tmp_path / "agent.jsonl"
+    _write_jsonl(trajectory, [
+        _record("user", "u1", None, "Do not inspect /tests"),
+        _record("assistant", "a1", "u1", "verify compilation/tests without sbt"),
+    ])
+
+    assert AUDITOR._hidden_tests_path_mentions(trajectory) == 0
+
+
+def test_hidden_tests_path_scan_rejects_model_tool_path(tmp_path):
+    trajectory = tmp_path / "agent.jsonl"
+    assistant = _record("assistant", "a1", "u1", "")
+    assistant["message"]["content"] = [
+        {"type": "tool_use", "name": "Bash", "input": {"command": "cat /tests/test.sh"}}
+    ]
+    _write_jsonl(trajectory, [assistant])
+
+    assert AUDITOR._hidden_tests_path_mentions(trajectory) == 1
