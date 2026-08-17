@@ -20,6 +20,45 @@ METHOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(METHOD)
 
 
+def _validate_verifier_evidence(verifier: Path, heldout_task: Path) -> dict:
+    """Validate the official evidence format actually emitted by this task.
+
+    Most SkillLearnBench tasks emit pytest CTRF, but a small source-defined
+    subset uses another official runner and writes its own log beside
+    reward.txt. Requiring CTRF for those tasks rejects valid benchmark evidence;
+    accepting only reward.txt would be too weak.
+    """
+    ctrf = verifier / "ctrf.json"
+    if ctrf.is_file():
+        try:
+            payload = json.loads(ctrf.read_text(encoding="utf-8"))
+            results = payload["results"]
+            if not isinstance(results, dict) or not isinstance(results.get("summary"), dict):
+                raise TypeError("results.summary is not an object")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise RuntimeError(f"Malformed CTRF evidence at {ctrf}: {exc}") from exc
+        return {"kind": "ctrf", "files": ["ctrf.json"]}
+
+    test_script = heldout_task / "tests" / "test.sh"
+    script_text = test_script.read_text(encoding="utf-8")
+    if "--ctrf" in script_text or "pytest-json-ctrf" in script_text:
+        raise RuntimeError(f"CTRF evidence required by {test_script} is missing")
+
+    wrapper_files = {"reward.txt", "stdout.txt", "stderr.txt"}
+    native_logs = sorted(
+        path for path in verifier.iterdir()
+        if path.is_file() and path.name not in wrapper_files and path.stat().st_size > 0
+    )
+    if not native_logs:
+        raise RuntimeError(
+            f"Non-CTRF verifier evidence is missing for {heldout_task.name}"
+        )
+    return {
+        "kind": "native-log",
+        "files": [path.name for path in native_logs],
+    }
+
+
 def audit_trial(trial: Path) -> dict:
     source = json.loads((trial / "selfgen_audit.json").read_text(encoding="utf-8"))
     scoreable = source.get("scoreable")
@@ -106,6 +145,7 @@ def audit_trial(trial: Path) -> dict:
 
         pass_count = 0
         tests_path_mentions = 0
+        verifier_evidence = []
         for number, item in zip(expected_numbers, heldouts, strict=True):
             if item.get("hidden_tests_mounted_in_agent") is not False:
                 raise RuntimeError(f"Hidden test isolation proof is absent for held-out {number}")
@@ -117,8 +157,9 @@ def audit_trial(trial: Path) -> dict:
             evidence_passed = reward == "1"
             if item.get("verifier_passed") is not evidence_passed:
                 raise RuntimeError(f"Held-out {number} verifier report disagrees with reward.txt")
-            if not (verifier / "ctrf.json").is_file():
-                raise RuntimeError(f"Held-out {number} CTRF evidence is missing")
+            heldout_task = TASKS_ROOT / str(family) / f"{family}-{number}"
+            evidence = _validate_verifier_evidence(verifier, heldout_task)
+            verifier_evidence.append({"instance_id": item["instance_id"], **evidence})
             if evidence_passed:
                 pass_count += 1
             agent_text = (trial / f"heldout-instance-{number}" / "agent.jsonl").read_text(
@@ -158,6 +199,7 @@ def audit_trial(trial: Path) -> dict:
             "heldout_pass_count": pass_count,
             "heldout_total": len(expected),
             "heldout_score": score,
+            "heldout_verifier_evidence": verifier_evidence,
             "skill_generation_valid": source.get("skill_generation_valid"),
             "skill_generation_status": source.get("skill_generation_status"),
         })

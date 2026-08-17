@@ -2,6 +2,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 
 AUDITOR_PATH = Path(__file__).parents[1] / "ap/audit_selfgen_continuity.py"
 SPEC = importlib.util.spec_from_file_location("selfgen_auditor", AUDITOR_PATH)
@@ -108,3 +110,34 @@ def test_full_family_audit_accepts_invalid_skill_without_dropping_heldouts(tmp_p
     ]
     assert result["heldout_pass_count"] == 3
     assert result["heldout_score"] == 0.6
+
+
+def test_verifier_evidence_accepts_source_defined_native_log(tmp_path):
+    task = tmp_path / "family-2"
+    tests = task / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test.sh").write_text("python3 /tests/check.py > /logs/verifier/output.log\n")
+    verifier = tmp_path / "verifier"
+    verifier.mkdir()
+    (verifier / "reward.txt").write_text("1\n")
+    (verifier / "stdout.txt").write_text("")
+    (verifier / "stderr.txt").write_text("")
+    (verifier / "output.log").write_text("Tests passed: 10/10\n")
+
+    evidence = AUDITOR._validate_verifier_evidence(verifier, task)
+
+    assert evidence == {"kind": "native-log", "files": ["output.log"]}
+
+
+def test_verifier_evidence_requires_ctrf_when_task_declares_it(tmp_path):
+    task = tmp_path / "family-2"
+    tests = task / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test.sh").write_text("pytest --ctrf /logs/verifier/ctrf.json /tests/test.py\n")
+    verifier = tmp_path / "verifier"
+    verifier.mkdir()
+    (verifier / "reward.txt").write_text("1\n")
+    (verifier / "output.log").write_text("passed\n")
+
+    with pytest.raises(RuntimeError, match="CTRF evidence required"):
+        AUDITOR._validate_verifier_evidence(verifier, task)
