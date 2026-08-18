@@ -16,6 +16,12 @@ assert SPEC and SPEC.loader
 METHOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(METHOD)
 
+AGENTS_PATH = Path(__file__).parents[1] / "agents/__init__.py"
+AGENTS_SPEC = importlib.util.spec_from_file_location("skilllearnbench_agents", AGENTS_PATH)
+assert AGENTS_SPEC and AGENTS_SPEC.loader
+AGENTS = importlib.util.module_from_spec(AGENTS_SPEC)
+AGENTS_SPEC.loader.exec_module(AGENTS)
+
 
 SESSION = "11111111-1111-4111-8111-111111111111"
 
@@ -244,6 +250,12 @@ def test_skill_candidate_classification_keeps_invalid_output_as_model_behavior()
     assert valid["valid"] is True
     assert valid["status"] == "valid"
     assert valid["skills"] == ["/root/skills/good/SKILL.md"]
+
+
+def test_claude_code_timeout_bundle_is_forwarded_to_task_containers():
+    agent = AGENTS.get_agent("claude-code")
+    assert agent is not None
+    assert "CLAUDECODE_ENVVARS" in agent["passthrough_env"]
 
 
 def test_scoreable_mode_is_explicit_and_fail_closed(monkeypatch):

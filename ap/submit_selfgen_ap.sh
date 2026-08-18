@@ -81,12 +81,23 @@ if [[ "${MODEL}" == "claude-opus-5" && "${REASONING_EFFORT}" != "max" ]]; then
 fi
 REQUEST_TIMEOUT_SECONDS="${REQUEST_TIMEOUT_SECONDS:-3600}"
 RUNTIME_TIMEOUT_SECONDS="${RUNTIME_TIMEOUT_SECONDS:-72000}"
+CLAUDECODE_ENVVARS="${CLAUDECODE_ENVVARS:-{\"API_TIMEOUT_MS\":\"3300000\", \"API_FORCE_IDLE_TIMEOUT\": \"0\", \"DISABLE_GROWTHBOOK\": \"1\", \"CLAUDE_STREAM_IDLE_TIMEOUT_MS\": \"1800000\"}}"
 for timeout_value in "${REQUEST_TIMEOUT_SECONDS}" "${RUNTIME_TIMEOUT_SECONDS}"; do
   [[ "${timeout_value}" =~ ^[1-9][0-9]*$ ]] || {
     echo "timeout values must be positive integer seconds" >&2
     exit 2
   }
 done
+jq -e '
+  type == "object" and length == 4 and
+  .API_TIMEOUT_MS == "3300000" and
+  .API_FORCE_IDLE_TIMEOUT == "0" and
+  .DISABLE_GROWTHBOOK == "1" and
+  .CLAUDE_STREAM_IDLE_TIMEOUT_MS == "1800000"
+' <<<"${CLAUDECODE_ENVVARS}" >/dev/null || {
+  echo "CLAUDECODE_ENVVARS must match the pinned Claude Code timeout bundle" >&2
+  exit 2
+}
 (( REQUEST_TIMEOUT_SECONDS < RUNTIME_TIMEOUT_SECONDS )) || {
   echo "REQUEST_TIMEOUT_SECONDS must be less than RUNTIME_TIMEOUT_SECONDS" >&2
   exit 2
@@ -147,6 +158,7 @@ common="$(jq -cn \
   --arg force_proxy "${FORCE_PROXY}" \
   --arg effort "${REASONING_EFFORT}" \
   --arg scoreable "${SCOREABLE}" \
+  --arg claudecode_envvars "${CLAUDECODE_ENVVARS}" \
   --argjson max_tokens "${MAX_TOKENS}" \
   --argjson request_timeout "${REQUEST_TIMEOUT_SECONDS}" \
   --argjson runtime_timeout_sec "${RUNTIME_TIMEOUT_SECONDS}" \
@@ -154,7 +166,8 @@ common="$(jq -cn \
     model_api_key:$api_key,provider:$provider,harbor_agent:"claude-code",
     force_proxy:$force_proxy,reasoning_effort:$effort,max_iterations:200,
     max_tokens:$max_tokens,request_timeout:$request_timeout,runtime_timeout_sec:$runtime_timeout_sec,
-    claude_code_version:"2.1.220",scoreable:$scoreable}')"
+    claude_code_version:"2.1.220",claudecode_envvars:$claudecode_envvars,
+    scoreable:$scoreable}')"
 
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 model_slug="$(printf '%s' "${MODEL}" | tr -cs '[:alnum:]' '-')"

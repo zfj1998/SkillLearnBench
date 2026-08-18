@@ -46,7 +46,7 @@ AGENTS: dict[str, dict] = {
             "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
             "CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
             "CLAUDE_CODE_VERSION", "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
-            "NPM_CONFIG_REGISTRY",
+            "CLAUDECODE_ENVVARS", "NPM_CONFIG_REGISTRY",
         ],
         "run": 'claude --verbose --output-format stream-json --model {model} --max-turns {max_steps} -p "$(cat {instruction_file})" --allowedTools {allowed_tools}{extra_flags}',
         "default_tools": _CLAUDE_DEFAULT_TOOLS,
