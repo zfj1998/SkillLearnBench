@@ -716,7 +716,7 @@ def run_task(task_id: str, *, agent_id: str = "codex", model: str | None = None,
         skills_stub = build_env / "skills"
         skills_stub.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(
-            ["docker", "build", "-t", image_tag, str(build_env)],
+            ["docker", "build", "--network=host", "-t", image_tag, str(build_env)],
             capture_output=True,
             text=True,
         )
