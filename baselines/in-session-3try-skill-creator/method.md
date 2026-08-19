@@ -25,3 +25,25 @@ The downloaded trial can be independently checked with:
 ```bash
 python ap/audit_selfgen_continuity.py /path/to/trial-directory
 ```
+
+## Weak-learning ablations
+
+`SELFGEN_ABLATION_MODE` selects one of four audited protocols while keeping the
+same frozen-library held-out evaluation:
+
+- `standard`: the protocol above.
+- `prompt-only`: give Skill Creator only the instance-1 instruction; do not run
+  the learning environment or verifier. The generation turn is restricted to
+  `Skill` and `Write`.
+- `family-only`: give Skill Creator only the family identifier and a plain-text
+  rendering of that identifier; do not expose an instance prompt, environment,
+  solve trajectory, or verifier feedback. The generation turn is restricted to
+  `Skill` and `Write`.
+- `trajectory-summary`: retain the same-session verifier-backed solve attempts,
+  but replace Skill Creator with an ordinary summary turn restricted to
+  `Write`.
+
+Every artifact records the selected mode, protocol version, whether the
+learning environment and verifier ran, the generation allowlist, and the tools
+actually used. The offline auditor fails closed when those claims disagree
+with the retained trajectories.

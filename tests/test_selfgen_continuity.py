@@ -258,6 +258,38 @@ def test_claude_code_timeout_bundle_is_forwarded_to_task_containers():
     assert "CLAUDECODE_ENVVARS" in agent["passthrough_env"]
 
 
+def test_ablation_mode_defaults_and_rejects_unknown(monkeypatch):
+    monkeypatch.delenv("SELFGEN_ABLATION_MODE", raising=False)
+    assert METHOD._ablation_mode() == "standard"
+    for mode in ("prompt-only", "family-only", "trajectory-summary"):
+        monkeypatch.setenv("SELFGEN_ABLATION_MODE", mode)
+        assert METHOD._ablation_mode() == mode
+    monkeypatch.setenv("SELFGEN_ABLATION_MODE", "invented")
+    with pytest.raises(RuntimeError, match="SELFGEN_ABLATION_MODE"):
+        METHOD._ablation_mode()
+
+
+def test_restricted_agent_keeps_only_explicit_tools_without_mutating_source():
+    source = {"default_tools": ["Bash", "Read", "Write", "Skill"], "name": "cc"}
+    restricted = METHOD._restricted_agent(source, {"Write", "Skill"})
+    assert restricted["default_tools"] == ["Write", "Skill"]
+    assert source["default_tools"] == ["Bash", "Read", "Write", "Skill"]
+    assert restricted["name"] == "cc"
+
+
+def test_agent_tool_names_extracts_only_assistant_tool_use(tmp_path):
+    path = tmp_path / "agent.jsonl"
+    _write(path, [
+        _record("user", "u1", None, content=[{"type": "tool_use", "name": "Bash"}]),
+        _record("assistant", "a1", "u1", content=[
+            {"type": "text", "text": "writing"},
+            {"type": "tool_use", "id": "t1", "name": "Skill"},
+            {"type": "tool_use", "id": "t2", "name": "Write"},
+        ]),
+    ])
+    assert METHOD._agent_tool_names(path) == ["Skill", "Write"]
+
+
 def test_scoreable_mode_is_explicit_and_fail_closed(monkeypatch):
     monkeypatch.delenv("SELFGEN_SCOREABLE", raising=False)
     assert METHOD._scoreable_mode() is False

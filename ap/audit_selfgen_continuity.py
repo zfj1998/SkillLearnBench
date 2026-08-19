@@ -88,6 +88,15 @@ def _validate_verifier_evidence(verifier: Path, heldout_task: Path) -> dict:
 
 def audit_trial(trial: Path) -> dict:
     source = json.loads((trial / "selfgen_audit.json").read_text(encoding="utf-8"))
+    mode = source.get("ablation_mode", "standard")
+    protocols = {
+        "standard": "in-session-3try-skill-creator-family-v2",
+        "prompt-only": "prompt-only-skill-creator-family-v1",
+        "family-only": "family-only-skill-creator-family-v1",
+        "trajectory-summary": "in-session-3try-trajectory-summary-family-v1",
+    }
+    if mode not in protocols or source.get("protocol") != protocols[mode]:
+        raise RuntimeError("Ablation mode and protocol disagree")
     scoreable = source.get("scoreable")
     if type(scoreable) is not bool:
         raise RuntimeError("Runtime scoreable marker is missing or malformed")
@@ -95,24 +104,63 @@ def audit_trial(trial: Path) -> dict:
     attempts = int(source["attempts_used"])
     snapshots = []
     previous = None
-    for attempt in range(1, attempts + 1):
-        phase = trial / "same-session-attempts" / f"attempt-{attempt:02d}"
-        snapshot = phase / "claude-session.jsonl"
-        prompt = (phase / "phase-prompt.txt").read_text(encoding="utf-8")
+    if mode in {"prompt-only", "family-only"}:
+        if attempts != 0:
+            raise RuntimeError("Generation-only ablation unexpectedly ran solve attempts")
+        snapshot = trial / "generation-session.jsonl"
+        prompt = (trial / "generation-prompt.txt").read_text(encoding="utf-8")
         snapshots.append(METHOD._audit_session_snapshot(
             snapshot, session_id=session_id, expected_prompt=prompt,
-            previous_path=previous,
         ))
-        previous = snapshot
-    reflection_snapshot = trial / "reflection-session.jsonl"
-    reflection_prompt = (trial / "reflection-prompt.txt").read_text(encoding="utf-8")
-    snapshots.append(METHOD._audit_session_snapshot(
-        reflection_snapshot, session_id=session_id,
-        expected_prompt=reflection_prompt, previous_path=previous,
-    ))
+        if source.get("terminal_verifier_passed") is not None:
+            raise RuntimeError("Generation-only ablation unexpectedly ran a learning verifier")
+        if source.get("learning_environment_executed") is not False:
+            raise RuntimeError("Generation-only environment isolation marker is absent")
+        if source.get("learning_verifier_executed") is not False:
+            raise RuntimeError("Generation-only verifier isolation marker is absent")
+        allowed = source.get("generation_allowed_tools")
+        used = source.get("generation_tool_names")
+        if not isinstance(allowed, list) or not set(allowed) <= {"Skill", "Write"}:
+            raise RuntimeError("Generation-only allowed-tool evidence is malformed")
+        if not isinstance(used, list) or not set(used) <= set(allowed):
+            raise RuntimeError("Generation-only trajectory contains forbidden tools")
+        if source.get("generation_environment_access_verified") is not True:
+            raise RuntimeError("Generation-only environment isolation was not verified")
+    else:
+        if not 1 <= attempts <= 3:
+            raise RuntimeError("Learning ablation must use one to three attempts")
+        for attempt in range(1, attempts + 1):
+            phase = trial / "same-session-attempts" / f"attempt-{attempt:02d}"
+            snapshot = phase / "claude-session.jsonl"
+            prompt = (phase / "phase-prompt.txt").read_text(encoding="utf-8")
+            snapshots.append(METHOD._audit_session_snapshot(
+                snapshot, session_id=session_id, expected_prompt=prompt,
+                previous_path=previous,
+            ))
+            previous = snapshot
+        reflection_snapshot = trial / "reflection-session.jsonl"
+        reflection_prompt = (trial / "reflection-prompt.txt").read_text(encoding="utf-8")
+        snapshots.append(METHOD._audit_session_snapshot(
+            reflection_snapshot, session_id=session_id,
+            expected_prompt=reflection_prompt, previous_path=previous,
+        ))
+        if source.get("learning_environment_executed") is not True:
+            raise RuntimeError("Learning environment execution marker is absent")
+        if source.get("learning_verifier_executed") is not True:
+            raise RuntimeError("Learning verifier execution marker is absent")
+        if mode == "trajectory-summary":
+            allowed = source.get("generation_allowed_tools")
+            used = source.get("generation_tool_names")
+            if allowed != ["Write"] or not isinstance(used, list):
+                raise RuntimeError("Trajectory-summary tool evidence is malformed")
+            if "Skill" in used or not set(used) <= {"Write"}:
+                raise RuntimeError("Trajectory-summary used the Skill workflow")
+            if source.get("skill_creator_allowed") is not False:
+                raise RuntimeError("Trajectory-summary Skill Creator isolation marker is absent")
 
     result = {
         "protocol": source["protocol"],
+        "ablation_mode": mode,
         "scoreable": scoreable,
         "session_id": session_id,
         "attempts_used": attempts,

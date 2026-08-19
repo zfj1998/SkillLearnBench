@@ -24,6 +24,12 @@ from typing import Any
 _SESSION_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 _CLAUDE_TURN_TIMEOUT_SECONDS = 7200
 _HELDOUT_CONTAINER_KEEPALIVE_SECONDS = 10800
+_ABLATION_MODES = {
+    "standard",
+    "prompt-only",
+    "family-only",
+    "trajectory-summary",
+}
 _BINARY_SAFE_CAT = r'''#!/bin/sh
 set -u
 if [ "$#" -eq 0 ]; then
@@ -49,6 +55,42 @@ def _scoreable_mode() -> bool:
     if value not in {"true", "false"}:
         raise RuntimeError("SELFGEN_SCOREABLE must be true or false")
     return value == "true"
+
+
+def _ablation_mode() -> str:
+    value = os.environ.get("SELFGEN_ABLATION_MODE", "standard").strip().lower()
+    if value not in _ABLATION_MODES:
+        raise RuntimeError(
+            "SELFGEN_ABLATION_MODE must be one of: " + ", ".join(sorted(_ABLATION_MODES))
+        )
+    return value
+
+
+def _restricted_agent(agent: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
+    restricted = dict(agent)
+    restricted["default_tools"] = [
+        tool for tool in agent.get("default_tools", []) if tool in allowed
+    ]
+    return restricted
+
+
+def _agent_tool_names(path: Path) -> list[str]:
+    names: list[str] = []
+    for record in _jsonl_records(path):
+        if record.get("type") != "assistant":
+            continue
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if (
+                isinstance(part, dict)
+                and part.get("type") == "tool_use"
+                and isinstance(part.get("name"), str)
+            ):
+                names.append(part["name"])
+    return names
 
 
 def _install_binary_safe_cat(container: str) -> None:
@@ -665,75 +707,157 @@ def run(
     max_steps: int,
 ) -> tuple[bool, int, str, str, int]:
     _install_binary_safe_cat(container_name)
+    ablation_mode = _ablation_mode()
     session_id = str(uuid.uuid4())
     audit_dir = trial_path / "same-session-attempts"
     audit_dir.mkdir(parents=True, exist_ok=True)
-    attempts = max(1, min(int(max_rounds), 3))
     total_steps = 0
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
-    passed = False
+    passed: bool | None = None
     feedback = ""
-    verifier_exit = 0
+    verifier_exit: int | None = None
     session_snapshots: list[dict[str, Any]] = []
     previous_session_path: Path | None = None
+    generation_tool_names: list[str] = []
+    generation_allowed_tools: list[str] | None = None
 
-    for attempt in range(1, attempts + 1):
-        if attempt == 1:
-            prompt = instruction
-        else:
-            prompt = (
-                "Continue solving the same task in this same session. The hidden official verifier "
-                "was run in an isolated container. You may use only this bounded feedback; do not "
-                "look for verifier sources or logs.\n\n" + feedback
+    if ablation_mode in {"prompt-only", "family-only"}:
+        family = task_path.parent.name
+        if ablation_mode == "prompt-only":
+            available_information = (
+                "You may use only the following instance-1 instruction. You must not inspect or "
+                "execute the task environment, and you will receive no verifier feedback.\n\n"
+                + instruction
             )
-        phase_dir = audit_dir / f"attempt-{attempt:02d}"
-        phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / "phase-prompt.txt").write_text(prompt, encoding="utf-8")
+        else:
+            available_information = (
+                "You may use only this task-family identifier: "
+                f"{family!r} (human-readable: {family.replace('-', ' ')}). "
+                "No concrete instance instruction, environment, solve trajectory, or verifier "
+                "feedback is available."
+            )
+        generation_prompt = (
+            available_information
+            + "\n\nUse the preloaded skill-creator skill to write 1-5 reusable skills under "
+            f"{task_workdir}/environment/skills/<skill-name>/SKILL.md for future sibling "
+            "instances. Do not claim knowledge you were not given, and do not solve or inspect "
+            "the current environment."
+        )
+        (trial_path / "generation-prompt.txt").write_text(
+            generation_prompt, encoding="utf-8"
+        )
+        generation_agent = _restricted_agent(agent, {"Skill", "Write"})
+        generation_allowed_tools = generation_agent["default_tools"]
         rc, out, err, steps = _claude_turn(
-            container=container_name, agent=agent, model=model_name, prompt=prompt,
-            session_id=session_id, resume=attempt > 1, max_steps=max_steps,
-            output_path=str(phase_dir / "agent.jsonl"), task_path=task_path,
+            container=container_name, agent=generation_agent, model=model_name,
+            prompt=generation_prompt, session_id=session_id, resume=False,
+            max_steps=max_steps, output_path=str(trial_path / "generation.jsonl"),
+            task_path=task_path,
         )
         total_steps += steps
         stdout_parts.append(out)
         stderr_parts.append(err)
-        (phase_dir / "agent-exit.txt").write_text(str(rc), encoding="utf-8")
-        session_path = phase_dir / "claude-session.jsonl"
+        generation_session_path = trial_path / "generation-session.jsonl"
         session_snapshots.append(_export_and_audit_session(
-            container=container_name, session_id=session_id, destination=session_path,
-            expected_prompt=prompt, previous_path=previous_session_path,
+            container=container_name, session_id=session_id,
+            destination=generation_session_path, expected_prompt=generation_prompt,
+            previous_path=None,
         ))
-        previous_session_path = session_path
-        passed, feedback, verifier_exit = _verify_snapshot(
-            container=container_name, task_path=task_path, trial_path=trial_path, attempt=attempt
-        )
-        (phase_dir / "bounded-feedback.txt").write_text(feedback, encoding="utf-8")
-        if passed:
-            break
+        generation_tool_names = _agent_tool_names(trial_path / "generation.jsonl")
+        forbidden = sorted(set(generation_tool_names) - set(generation_allowed_tools))
+        if forbidden:
+            raise RuntimeError(
+                "Generation-only ablation accessed forbidden tools: " + ", ".join(forbidden)
+            )
+        if rc != 0:
+            raise RuntimeError(f"Generation-only skill turn failed with agent exit {rc}")
+    else:
+        attempts = max(1, min(int(max_rounds), 3))
+        passed = False
+        for attempt in range(1, attempts + 1):
+            if attempt == 1:
+                prompt = instruction
+            else:
+                prompt = (
+                    "Continue solving the same task in this same session. The hidden official "
+                    "verifier was run in an isolated container. You may use only this bounded "
+                    "feedback; do not look for verifier sources or logs.\n\n" + feedback
+                )
+            phase_dir = audit_dir / f"attempt-{attempt:02d}"
+            phase_dir.mkdir(parents=True, exist_ok=True)
+            (phase_dir / "phase-prompt.txt").write_text(prompt, encoding="utf-8")
+            rc, out, err, steps = _claude_turn(
+                container=container_name, agent=agent, model=model_name, prompt=prompt,
+                session_id=session_id, resume=attempt > 1, max_steps=max_steps,
+                output_path=str(phase_dir / "agent.jsonl"), task_path=task_path,
+            )
+            total_steps += steps
+            stdout_parts.append(out)
+            stderr_parts.append(err)
+            (phase_dir / "agent-exit.txt").write_text(str(rc), encoding="utf-8")
+            session_path = phase_dir / "claude-session.jsonl"
+            session_snapshots.append(_export_and_audit_session(
+                container=container_name, session_id=session_id, destination=session_path,
+                expected_prompt=prompt, previous_path=previous_session_path,
+            ))
+            previous_session_path = session_path
+            passed, feedback, verifier_exit = _verify_snapshot(
+                container=container_name, task_path=task_path,
+                trial_path=trial_path, attempt=attempt,
+            )
+            (phase_dir / "bounded-feedback.txt").write_text(feedback, encoding="utf-8")
+            if passed:
+                break
 
-    reflection = (
-        "Now stop modifying the task solution. Use the preloaded skill-creator skill to capture "
-        "reusable knowledge from all solve attempts and verifier feedback in this session. Write "
-        f"1-5 skills under {task_workdir}/environment/skills/<skill-name>/SKILL.md. Generalize to "
-        "sibling instances; do not include the specific poem or hidden-test guesses."
-    )
-    (trial_path / "reflection-prompt.txt").write_text(reflection, encoding="utf-8")
-    rc, out, err, steps = _claude_turn(
-        container=container_name, agent=agent, model=model_name, prompt=reflection,
-        session_id=session_id, resume=True, max_steps=max_steps,
-        output_path=str(trial_path / "reflection.jsonl"), task_path=task_path,
-    )
-    total_steps += steps
-    stdout_parts.append(out)
-    stderr_parts.append(err)
-    reflection_session_path = trial_path / "reflection-session.jsonl"
-    session_snapshots.append(_export_and_audit_session(
-        container=container_name, session_id=session_id, destination=reflection_session_path,
-        expected_prompt=reflection, previous_path=previous_session_path,
-    ))
-    if rc != 0:
-        raise RuntimeError(f"Skill Creator reflection failed with agent exit {rc}")
+        if ablation_mode == "trajectory-summary":
+            reflection = (
+                "Now stop modifying the task solution. Without using the Skill tool or any "
+                "preloaded skill-creation workflow, write an ordinary concise summary of reusable "
+                "lessons from the solve attempts and bounded verifier feedback in this session. "
+                "For a format-compatible held-out evaluation, save that summary as 1-5 SKILL.md "
+                f"files under {task_workdir}/environment/skills/<skill-name>/SKILL.md, each with "
+                "minimal YAML name and description frontmatter. Generalize to sibling instances "
+                "and do not include instance-specific answers or hidden-test guesses."
+            )
+            reflection_agent = _restricted_agent(agent, {"Write"})
+            generation_allowed_tools = reflection_agent["default_tools"]
+        else:
+            reflection = (
+                "Now stop modifying the task solution. Use the preloaded skill-creator skill to "
+                "capture reusable knowledge from all solve attempts and verifier feedback in this "
+                f"session. Write 1-5 skills under {task_workdir}/environment/skills/"
+                "<skill-name>/SKILL.md. Generalize to sibling instances; do not include "
+                "instance-specific answers or hidden-test guesses."
+            )
+            reflection_agent = agent
+        (trial_path / "reflection-prompt.txt").write_text(reflection, encoding="utf-8")
+        rc, out, err, steps = _claude_turn(
+            container=container_name, agent=reflection_agent, model=model_name,
+            prompt=reflection, session_id=session_id, resume=True, max_steps=max_steps,
+            output_path=str(trial_path / "reflection.jsonl"), task_path=task_path,
+        )
+        total_steps += steps
+        stdout_parts.append(out)
+        stderr_parts.append(err)
+        reflection_session_path = trial_path / "reflection-session.jsonl"
+        session_snapshots.append(_export_and_audit_session(
+            container=container_name, session_id=session_id,
+            destination=reflection_session_path, expected_prompt=reflection,
+            previous_path=previous_session_path,
+        ))
+        generation_tool_names = _agent_tool_names(trial_path / "reflection.jsonl")
+        if ablation_mode == "trajectory-summary":
+            forbidden = sorted(set(generation_tool_names) - set(generation_allowed_tools or []))
+            if forbidden or "Skill" in generation_tool_names:
+                raise RuntimeError(
+                    "Trajectory-summary ablation used a forbidden generation tool: "
+                    + ", ".join(forbidden or ["Skill"])
+                )
+        if rc != 0:
+            label = "Trajectory summary" if ablation_mode == "trajectory-summary" else "Skill Creator reflection"
+            raise RuntimeError(f"{label} failed with agent exit {rc}")
+
     skill_candidate, frozen = _capture_skill_candidate(
         container_name, task_workdir, trial_path,
     )
@@ -749,18 +873,35 @@ def run(
     if len(set(heldout_session_ids)) != len(heldouts) or session_id in heldout_session_ids:
         raise RuntimeError("Held-out evaluations did not use distinct fresh sessions")
     family = task_path.parent.name
-    expected_heldouts = [item["instance_id"] for item in heldouts]
+    expected_heldouts = [f"{family}-{number}" for number in _family_heldout_numbers(task_path)]
     if [item["instance_id"] for item in heldouts] != expected_heldouts:
         raise RuntimeError("Held-out instance coverage or order mismatch")
     heldout_pass_count = sum(item["verifier_passed"] is True for item in heldouts)
+    protocol = {
+        "standard": "in-session-3try-skill-creator-family-v2",
+        "prompt-only": "prompt-only-skill-creator-family-v1",
+        "family-only": "family-only-skill-creator-family-v1",
+        "trajectory-summary": "in-session-3try-trajectory-summary-family-v1",
+    }[ablation_mode]
+    attempts_used = len(list(audit_dir.glob("attempt-*")))
     audit = {
-        "protocol": "in-session-3try-skill-creator-family-v2",
+        "protocol": protocol,
+        "ablation_mode": ablation_mode,
         "scoreable": _scoreable_mode(),
         "family_id": family,
         "session_id": session_id,
-        "attempts_used": len(list(audit_dir.glob("attempt-*"))),
+        "attempts_used": attempts_used,
         "terminal_verifier_passed": passed,
         "reflection_exit": rc,
+        "learning_environment_executed": ablation_mode in {"standard", "trajectory-summary"},
+        "learning_verifier_executed": ablation_mode in {"standard", "trajectory-summary"},
+        "generation_tool_names": generation_tool_names,
+        "generation_allowed_tools": generation_allowed_tools,
+        "generation_environment_access_verified": (
+            ablation_mode not in {"prompt-only", "family-only"}
+            or set(generation_tool_names) <= {"Skill", "Write"}
+        ),
+        "skill_creator_allowed": ablation_mode != "trajectory-summary",
         "skill_generation_valid": skill_candidate["valid"],
         "skill_generation_status": skill_candidate["status"],
         "skills": skill_candidate["skills"],
@@ -791,4 +932,5 @@ def run(
     }
     (trial_path / "selfgen_audit.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
     # The plugin contract's rounds field is the scientific solve-attempt count.
-    return passed, total_steps, "".join(stdout_parts), "".join(stderr_parts), audit["attempts_used"]
+    runner_passed = True if passed is None else passed
+    return runner_passed, total_steps, "".join(stdout_parts), "".join(stderr_parts), attempts_used

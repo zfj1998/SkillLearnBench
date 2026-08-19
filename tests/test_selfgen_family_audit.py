@@ -78,6 +78,8 @@ def test_full_family_audit_accepts_invalid_skill_without_dropping_heldouts(tmp_p
         "family_id": "family",
         "session_id": SESSION,
         "attempts_used": 1,
+        "learning_environment_executed": True,
+        "learning_verifier_executed": True,
         "parent_continuity_verified": True,
         "prefix_continuity_verified": True,
         "prompt_continuity_verified": True,

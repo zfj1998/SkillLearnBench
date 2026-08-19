@@ -7,6 +7,7 @@ ENV_FILE="${ENV_FILE:-${WORKSPACE_DIR}/.env}"
 MODE="${1:-dry-run}"
 FAMILY="${2:-chinese-poem-generator}"
 DRY_RUN="${DRY_RUN:-false}"
+ABLATION_MODE="${ABLATION_MODE:-standard}"
 
 if [[ -f "${ENV_FILE}" ]]; then
   set +x
@@ -31,7 +32,7 @@ case "${MODEL}" in
     PROVIDER="${PROVIDER:-openai}"
     FORCE_PROXY="${FORCE_PROXY:-true}"
     MODEL_BASE_URL="${MODEL_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
-    MODEL_API_KEY="${MODEL_API_KEY:-${DASHSCOPE_API_KEY_kimi:-}}"
+    MODEL_API_KEY="${MODEL_API_KEY:-${DASHSCOPE_API_KEY:-${DASHSCOPE_API_KEY_kimi:-}}}"
     REASONING_EFFORT="${REASONING_EFFORT:-xhigh}"
     MODEL_MAX_TOKENS_DEFAULT=18000
     ;;
@@ -103,14 +104,18 @@ jq -e '
   exit 2
 }
 case "${MODE}" in
-  dry-run|smoke|full) ;;
-  *) echo "usage: $0 {dry-run|smoke|full} [family]" >&2; exit 2 ;;
+  dry-run|smoke|unit|full) ;;
+  *) echo "usage: $0 {dry-run|smoke|unit|full} [family]" >&2; exit 2 ;;
+esac
+case "${ABLATION_MODE}" in
+  standard|prompt-only|family-only|trajectory-summary) ;;
+  *) echo "invalid ABLATION_MODE: ${ABLATION_MODE}" >&2; exit 2 ;;
 esac
 case "${DRY_RUN}" in
   true|false) ;;
   *) echo "DRY_RUN must be true or false" >&2; exit 2 ;;
 esac
-SCOREABLE="${SCOREABLE:-$([[ "${MODE}" == "full" ]] && printf true || printf false)}"
+SCOREABLE="${SCOREABLE:-$([[ "${MODE}" == "full" || "${MODE}" == "unit" ]] && printf true || printf false)}"
 case "${SCOREABLE}" in
   true|false) ;;
   *) echo "SCOREABLE must be true or false" >&2; exit 2 ;;
@@ -158,6 +163,7 @@ common="$(jq -cn \
   --arg force_proxy "${FORCE_PROXY}" \
   --arg effort "${REASONING_EFFORT}" \
   --arg scoreable "${SCOREABLE}" \
+  --arg ablation_mode "${ABLATION_MODE}" \
   --arg claudecode_envvars "${CLAUDECODE_ENVVARS}" \
   --argjson max_tokens "${MAX_TOKENS}" \
   --argjson request_timeout "${REQUEST_TIMEOUT_SECONDS}" \
@@ -167,11 +173,11 @@ common="$(jq -cn \
     force_proxy:$force_proxy,reasoning_effort:$effort,max_iterations:200,
     max_tokens:$max_tokens,request_timeout:$request_timeout,runtime_timeout_sec:$runtime_timeout_sec,
     claude_code_version:"2.1.220",claudecode_envvars:$claudecode_envvars,
-    scoreable:$scoreable}')"
+    scoreable:$scoreable,ablation_mode:$ablation_mode}')"
 
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 model_slug="$(printf '%s' "${MODEL}" | tr -cs '[:alnum:]' '-')"
-suite="skilllearnbench-${model_slug}-${REASONING_EFFORT}-selfgen-${MODE}-${stamp}"
+suite="skilllearnbench-${model_slug}-${REASONING_EFFORT}-selfgen-${ABLATION_MODE}-${MODE}-${stamp}"
 if [[ -z "${CONCURRENCY:-}" ]]; then
   [[ "${MODE}" == "full" ]] && CONCURRENCY=20 || CONCURRENCY=1
 fi
