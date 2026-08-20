@@ -68,8 +68,15 @@ def _ablation_mode() -> str:
 
 def _restricted_agent(agent: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
     restricted = dict(agent)
+    original_tools = list(agent.get("default_tools", []))
     restricted["default_tools"] = [
-        tool for tool in agent.get("default_tools", []) if tool in allowed
+        tool for tool in original_tools if tool in allowed
+    ]
+    # Claude Code's --allowedTools controls permission prompts; it does not
+    # remove other tools from the model-visible schema. Pair it with an
+    # explicit --disallowedTools list for isolation ablations.
+    restricted["hard_disallowed_tools"] = [
+        tool for tool in original_tools if tool not in allowed
     ]
     return restricted
 
@@ -415,11 +422,17 @@ def _claude_turn(
     _copy_text(container, prompt_path, prompt)
     session_flag = f"--resume {shlex.quote(session_id)}" if resume else f"--session-id {shlex.quote(session_id)}"
     tools = _allowed_tools(agent, task_path)
+    disallowed_tools = " ".join(
+        shlex.quote(tool) for tool in agent.get("hard_disallowed_tools", [])
+    )
+    disallowed_flag = (
+        f" --disallowedTools {disallowed_tools}" if disallowed_tools else ""
+    )
     command = (
         "claude --verbose --output-format stream-json "
         f"--model {shlex.quote(model)} --max-turns {int(max_steps)} "
         f"{session_flag} -p \"$(cat {prompt_path})\" "
-        f"--allowedTools {tools}"
+        f"--allowedTools {tools}{disallowed_flag}"
     )
     result = subprocess.run(
         ["docker", "exec", container, "sh", "-c", command],
@@ -721,6 +734,7 @@ def run(
     previous_session_path: Path | None = None
     generation_tool_names: list[str] = []
     generation_allowed_tools: list[str] | None = None
+    generation_disallowed_tools: list[str] | None = None
 
     if ablation_mode in {"prompt-only", "family-only"}:
         family = task_path.parent.name
@@ -749,6 +763,7 @@ def run(
         )
         generation_agent = _restricted_agent(agent, {"Skill", "Write"})
         generation_allowed_tools = generation_agent["default_tools"]
+        generation_disallowed_tools = generation_agent["hard_disallowed_tools"]
         rc, out, err, steps = _claude_turn(
             container=container_name, agent=generation_agent, model=model_name,
             prompt=generation_prompt, session_id=session_id, resume=False,
@@ -822,6 +837,7 @@ def run(
             )
             reflection_agent = _restricted_agent(agent, {"Write"})
             generation_allowed_tools = reflection_agent["default_tools"]
+            generation_disallowed_tools = reflection_agent["hard_disallowed_tools"]
         else:
             reflection = (
                 "Now stop modifying the task solution. Use the preloaded skill-creator skill to "
@@ -897,6 +913,7 @@ def run(
         "learning_verifier_executed": ablation_mode in {"standard", "trajectory-summary"},
         "generation_tool_names": generation_tool_names,
         "generation_allowed_tools": generation_allowed_tools,
+        "generation_disallowed_tools": generation_disallowed_tools,
         "generation_environment_access_verified": (
             ablation_mode not in {"prompt-only", "family-only"}
             or set(generation_tool_names) <= {"Skill", "Write"}

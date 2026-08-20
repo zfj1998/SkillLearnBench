@@ -119,11 +119,16 @@ def audit_trial(trial: Path) -> dict:
         if source.get("learning_verifier_executed") is not False:
             raise RuntimeError("Generation-only verifier isolation marker is absent")
         allowed = source.get("generation_allowed_tools")
+        disallowed = source.get("generation_disallowed_tools")
         used = source.get("generation_tool_names")
         if not isinstance(allowed, list) or not set(allowed) <= {"Skill", "Write"}:
             raise RuntimeError("Generation-only allowed-tool evidence is malformed")
         if not isinstance(used, list) or not set(used) <= set(allowed):
             raise RuntimeError("Generation-only trajectory contains forbidden tools")
+        if not isinstance(disallowed, list) or set(disallowed) & set(allowed):
+            raise RuntimeError("Generation-only hard-disallowed evidence is malformed")
+        if not {"Bash", "Read", "Edit", "Glob", "Grep"} <= set(disallowed):
+            raise RuntimeError("Generation-only environment tools were not hard-disallowed")
         if source.get("generation_environment_access_verified") is not True:
             raise RuntimeError("Generation-only environment isolation was not verified")
     else:
@@ -150,11 +155,14 @@ def audit_trial(trial: Path) -> dict:
             raise RuntimeError("Learning verifier execution marker is absent")
         if mode == "trajectory-summary":
             allowed = source.get("generation_allowed_tools")
+            disallowed = source.get("generation_disallowed_tools")
             used = source.get("generation_tool_names")
             if allowed != ["Write"] or not isinstance(used, list):
                 raise RuntimeError("Trajectory-summary tool evidence is malformed")
             if "Skill" in used or not set(used) <= {"Write"}:
                 raise RuntimeError("Trajectory-summary used the Skill workflow")
+            if not isinstance(disallowed, list) or "Skill" not in disallowed:
+                raise RuntimeError("Trajectory-summary did not hard-disallow Skill")
             if source.get("skill_creator_allowed") is not False:
                 raise RuntimeError("Trajectory-summary Skill Creator isolation marker is absent")
 

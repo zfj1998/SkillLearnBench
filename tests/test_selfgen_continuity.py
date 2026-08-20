@@ -273,8 +273,32 @@ def test_restricted_agent_keeps_only_explicit_tools_without_mutating_source():
     source = {"default_tools": ["Bash", "Read", "Write", "Skill"], "name": "cc"}
     restricted = METHOD._restricted_agent(source, {"Write", "Skill"})
     assert restricted["default_tools"] == ["Write", "Skill"]
+    assert restricted["hard_disallowed_tools"] == ["Bash", "Read"]
     assert source["default_tools"] == ["Bash", "Read", "Write", "Skill"]
     assert restricted["name"] == "cc"
+
+
+def test_claude_turn_emits_hard_disallowed_tools(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(METHOD, "_copy_text", lambda *args, **kwargs: None)
+    monkeypatch.setattr(METHOD.subprocess, "run", fake_run)
+    agent = {
+        "default_tools": ["Write"],
+        "hard_disallowed_tools": ["Bash", "Read", "Skill"],
+    }
+    METHOD._claude_turn(
+        container="container", agent=agent, model="model", prompt="prompt",
+        session_id=SESSION, resume=False, max_steps=10,
+        output_path=str(tmp_path / "agent.jsonl"), task_path=tmp_path,
+    )
+    shell_command = captured["command"][-1]
+    assert "--allowedTools Write" in shell_command
+    assert "--disallowedTools Bash Read Skill" in shell_command
 
 
 def test_agent_tool_names_extracts_only_assistant_tool_use(tmp_path):
