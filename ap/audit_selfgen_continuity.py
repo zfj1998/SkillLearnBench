@@ -20,6 +20,9 @@ METHOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(METHOD)
 
 _HIDDEN_TESTS_PATH = re.compile(r"(?<![A-Za-z0-9_.-])/tests(?:/|\b)")
+_COORDINATION_TOOLS = {
+    "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TodoRead", "TodoWrite",
+}
 
 
 def _hidden_tests_path_mentions(agent_jsonl: Path) -> int:
@@ -121,7 +124,7 @@ def audit_trial(trial: Path) -> dict:
         allowed = source.get("generation_allowed_tools")
         disallowed = source.get("generation_disallowed_tools")
         used = source.get("generation_tool_names")
-        if not isinstance(allowed, list) or not set(allowed) <= {"Skill", "Write"}:
+        if not isinstance(allowed, list) or not set(allowed) <= ({"Skill", "Write"} | _COORDINATION_TOOLS):
             raise RuntimeError("Generation-only allowed-tool evidence is malformed")
         if not isinstance(used, list) or not set(used) <= set(allowed):
             raise RuntimeError("Generation-only trajectory contains forbidden tools")
@@ -157,9 +160,9 @@ def audit_trial(trial: Path) -> dict:
             allowed = source.get("generation_allowed_tools")
             disallowed = source.get("generation_disallowed_tools")
             used = source.get("generation_tool_names")
-            if allowed != ["Write"] or not isinstance(used, list):
+            if not isinstance(allowed, list) or set(allowed) != ({"Write"} | _COORDINATION_TOOLS) or not isinstance(used, list):
                 raise RuntimeError("Trajectory-summary tool evidence is malformed")
-            if "Skill" in used or not set(used) <= {"Write"}:
+            if "Skill" in used or not set(used) <= ({"Write"} | _COORDINATION_TOOLS):
                 raise RuntimeError("Trajectory-summary used the Skill workflow")
             if not isinstance(disallowed, list) or "Skill" not in disallowed:
                 raise RuntimeError("Trajectory-summary did not hard-disallow Skill")

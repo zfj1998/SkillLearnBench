@@ -272,7 +272,10 @@ def test_ablation_mode_defaults_and_rejects_unknown(monkeypatch):
 def test_restricted_agent_keeps_only_explicit_tools_without_mutating_source():
     source = {"default_tools": ["Bash", "Read", "Write", "Skill"], "name": "cc"}
     restricted = METHOD._restricted_agent(source, {"Write", "Skill"})
-    assert restricted["default_tools"] == ["Write", "Skill"]
+    assert restricted["default_tools"] == [
+        "Write", "Skill", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
+        "TodoRead", "TodoWrite",
+    ]
     assert restricted["hard_disallowed_tools"] == ["Bash", "Read"]
     assert source["default_tools"] == ["Bash", "Read", "Write", "Skill"]
     assert restricted["name"] == "cc"

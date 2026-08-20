@@ -34,14 +34,14 @@ same frozen-library held-out evaluation:
 - `standard`: the protocol above.
 - `prompt-only`: give Skill Creator only the instance-1 instruction; do not run
   the learning environment or verifier. The generation turn is restricted to
-  `Skill` and `Write`.
+  `Skill`, `Write`, and non-environment task bookkeeping tools.
 - `family-only`: give Skill Creator only the family identifier and a plain-text
   rendering of that identifier; do not expose an instance prompt, environment,
   solve trajectory, or verifier feedback. The generation turn is restricted to
-  `Skill` and `Write`.
+  `Skill`, `Write`, and non-environment task bookkeeping tools.
 - `trajectory-summary`: retain the same-session verifier-backed solve attempts,
   but replace Skill Creator with an ordinary summary turn restricted to
-  `Write`.
+  `Write` plus non-environment task bookkeeping tools.
 
 Every artifact records the selected mode, protocol version, whether the
 learning environment and verifier ran, the generation allowlist, and the tools

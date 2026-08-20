@@ -30,6 +30,9 @@ _ABLATION_MODES = {
     "family-only",
     "trajectory-summary",
 }
+_COORDINATION_TOOLS = (
+    "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TodoRead", "TodoWrite",
+)
 _BINARY_SAFE_CAT = r'''#!/bin/sh
 set -u
 if [ "$#" -eq 0 ]; then
@@ -69,14 +72,19 @@ def _ablation_mode() -> str:
 def _restricted_agent(agent: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
     restricted = dict(agent)
     original_tools = list(agent.get("default_tools", []))
+    effective_allowed = allowed | set(_COORDINATION_TOOLS)
     restricted["default_tools"] = [
-        tool for tool in original_tools if tool in allowed
+        tool for tool in original_tools if tool in effective_allowed
     ]
+    restricted["default_tools"].extend(
+        tool for tool in _COORDINATION_TOOLS
+        if tool not in restricted["default_tools"]
+    )
     # Claude Code's --allowedTools controls permission prompts; it does not
     # remove other tools from the model-visible schema. Pair it with an
     # explicit --disallowedTools list for isolation ablations.
     restricted["hard_disallowed_tools"] = [
-        tool for tool in original_tools if tool not in allowed
+        tool for tool in original_tools if tool not in effective_allowed
     ]
     return restricted
 
