@@ -146,7 +146,8 @@ fi
 umask 077
 params_file="$(mktemp /tmp/skilllearnbench-selfgen-params.XXXXXX.json)"
 private_response="$(mktemp /tmp/skilllearnbench-selfgen-response.XXXXXX.json)"
-trap 'rm -f "${params_file}" "${private_response}"' EXIT
+private_error="$(mktemp /tmp/skilllearnbench-selfgen-error.XXXXXX.log)"
+trap 'rm -f "${params_file}" "${private_response}" "${private_error}"' EXIT
 jq -n --argjson families "$(printf '%s\n' "${FAMILIES[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
   --arg github_token "${GH_TOKEN}" \
   '$families | map(
@@ -192,7 +193,25 @@ command=(ap --cluster "${AP_CLUSTER}" job create "${AP_TEMPLATE}"
   --priority medium --idempotency --format json)
 [[ "${MODE}" == "full" ]] && command+=(--enable-post-process)
 [[ "${MODE}" == "dry-run" || "${DRY_RUN}" == "true" ]] && command+=(--dry-run)
-"${command[@]}" > "${private_response}"
+set +e
+"${command[@]}" > "${private_response}" 2> "${private_error}"
+ap_rc="$?"
+set -e
+if [[ "${ap_rc}" -ne 0 ]]; then
+  # ap-client prints a shell-ready retry command on failure. That command
+  # contains protected params, so never forward its stderr verbatim.
+  python3 - "${private_error}" <<'PY' >&2
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r'(?i)("?(?:model_api_key|api_key|authorization|github_token|gh_token)"?\s*[:=]\s*["\x27]?)[^"\x27\s,}]+', r'\1<redacted>', text)
+text = re.sub(r'(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]+', '<redacted>', text)
+print(text, end="")
+PY
+  exit "${ap_rc}"
+fi
 
 artifact_dir="${ROOT_DIR}/ap/artifacts/submissions"
 mkdir -p "${artifact_dir}"
